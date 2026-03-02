@@ -1,0 +1,23 @@
+[package]
+name = "juanlog"
+version = "1.0.0"
+edition = "2021"
+
+[lib]
+name = "juanlog"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+memchr = "2.7"
+memmap2 = "0.9"
+rayon = "1.10"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
