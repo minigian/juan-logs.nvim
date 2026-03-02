@@ -36,11 +36,6 @@ impl LogEngine {
                 mmap.len(),
                 libc::MADV_SEQUENTIAL,
             );
-            libc::madvise(
-                mmap.as_ptr() as *mut libc::c_void,
-                mmap.len(),
-                libc::MADV_RANDOM,
-            );
         }
 
         let mmap = Arc::new(mmap);
@@ -106,6 +101,19 @@ impl LogEngine {
             }
 
             let end = (offset + chunk_size).min(mmap.len());
+
+            #[cfg(unix)]
+            if end < mmap.len() {
+                let next_end = (end + chunk_size).min(mmap.len());
+                unsafe {
+                    libc::madvise(
+                        mmap.as_ptr().add(end) as *mut libc::c_void,
+                        next_end - end,
+                        libc::MADV_WILLNEED,
+                    );
+                }
+            }
+
             let chunk = &mmap[offset..end];
 
             let mut count = 0;
@@ -157,6 +165,15 @@ impl LogEngine {
         idx.original_total_lines = final_lines;
         idx.is_finished = true;
         bytes_processed.store(mmap.len(), Ordering::Relaxed);
+
+        #[cfg(unix)]
+        unsafe {
+            libc::madvise(
+                mmap.as_ptr() as *mut libc::c_void,
+                mmap.len(),
+                libc::MADV_RANDOM,
+            );
+        }
     }
 
     pub fn build_index_rayon(mmap: &Mmap, index: &RwLock<IndexState>) {
@@ -215,6 +232,15 @@ impl LogEngine {
         idx.chunks = chunks;
         idx.original_total_lines = original_total_lines;
         idx.is_finished = true;
+
+        #[cfg(unix)]
+        unsafe {
+            libc::madvise(
+                mmap.as_ptr() as *mut libc::c_void,
+                mmap.len(),
+                libc::MADV_RANDOM,
+            );
+        }
     }
 
     // keeps the piece table in sync with the background worker
