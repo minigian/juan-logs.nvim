@@ -30,7 +30,7 @@ local function get_lib_path()
 
     -- fallback to release path
     local str = debug.getinfo(1, "S").source:sub(2)
-    local plugin_root = str:match("(.*[/\\])"):gsub("lua[/\\]juan_log[/\\]$", "")
+    local plugin_root = str:match("(.*[/\\])"):gsub("lua[/\\]juanlog[/\\]$", "")
     return plugin_root .. "target/release/" .. lib_name
 end
 
