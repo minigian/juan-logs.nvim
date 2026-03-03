@@ -34,6 +34,7 @@ A: A classic Piece Table. Deleting a million lines just drops a node from a `Vec
 A: RPC overhead is slow. JSON serialization is slow. We use `extern "C"` to hand out raw memory pointers across the boundary directly to LuaJIT. Lua reads the C strings and renders the UI. It's standard `unsafe` boilerplate, but it's fast.
 
 **Q: Why not use Less or Vimpager?**
+
 A: Because this plugin lets you edit and use your Neovim keymaps natively through FFI; it's not just a viewer.
 
 **Q: Why not bigfile.nvim or faster.nvim?**
@@ -86,6 +87,7 @@ Consider this a proof of concept. This software does NOT perform magic; opening 
 Feel free to report any issue.
 
 I'm tired...
+
 
 
 
