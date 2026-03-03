@@ -75,6 +75,8 @@ When a file exceeds the `threshold_size`, it opens in dynamic mode. Since only a
 - `gg` - Jump to the absolute start of the file.
 - `G` - Jump to the absolute end of the file.
 
-### Important
+## Important
+
 Consider this a proof of concept. This software does NOT perform magic; opening speed depends entirely on your hardware. Be careful what you do, friend.
+
 
