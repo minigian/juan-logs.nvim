@@ -36,6 +36,9 @@ A: RPC overhead is slow. JSON serialization is slow. We use `extern "C"` to hand
 **Q: Why not use Less or Vimpager?**
 A: Because this plugin lets you edit and use your Neovim keymaps natively through FFI; it's not just a viewer.
 
+**Q: Why not bigfile.nvim or faster.nvim?**
+A: Existing plugins just disable syntax highlighting and plugins to save CPU, but they still load the entire file into Neovim's RAM buffer. If you open a 10GB file, Neovim will still crash. JuanLog bypasses Neovim's buffer entirely, using a Rust piece-table and mmap to stream only the visible lines. It uses virtually 0 extra RAM, no matter if the file is 100MB or 50GB.
+
 ## Requirements
 - Neovim >= 0.9.0
 - Rust / Cargo (to compile the core engine)
@@ -82,4 +85,5 @@ Consider this a proof of concept. This software does NOT perform magic; opening 
 Feel free to report any issue.
 
 I'm tired...
+
 
