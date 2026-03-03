@@ -4,7 +4,9 @@
 ## What is this?
 A high-performance log viewer for Neovim, powered by Rust and Piece Tables.
 This plugin lets you open large text files (gigabytes) slightly faster than vanilla Neovim without crashing it. It allows you to use Neovim (including plugins) smoothly, with minimal RAM and CPU usage while opening large files.
+
 ![Proof](https://github.com/user-attachments/assets/815e1772-1016-4223-ac04-c3cc0003b9b5)
+
 ## Should you use it?
 If you regularly open logs, database dumps, or CSVs larger than 100MB and Neovim freezes, crashes, or eats all your RAM, yes. If you only deal with small files, standard Neovim is already perfectly fine.
 
@@ -75,3 +77,4 @@ When a file exceeds the `threshold_size`, it opens in dynamic mode. Since only a
 
 ### Important
 Consider this a proof of concept. This software does NOT perform magic; opening speed depends entirely on your hardware. Be careful what you do, friend.
+
