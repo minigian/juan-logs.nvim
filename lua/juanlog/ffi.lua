@@ -28,9 +28,15 @@ local function get_lib_path()
         return local_dev_path
     end
 
-    -- fallback to release path
     local str = debug.getinfo(1, "S").source:sub(2)
     local plugin_root = str:match("(.*[/\\])"):gsub("lua[/\\]juanlog[/\\]$", "")
+
+    local prebuilt_path = plugin_root .. "bin/" .. lib_name
+    if vim.loop.fs_stat(prebuilt_path) then
+        return prebuilt_path
+    end
+
+    -- fallback to release path
     return plugin_root .. "target/release/" .. lib_name
 end
 
@@ -44,7 +50,7 @@ local function get_lib()
 
     if not ok then
         vim.schedule(function()
-            vim.notify("[JuanLog] Warning: Rust binary not found.\nGiant log viewer is disabled.", vim.log.levels.WARN)
+            vim.notify("[JuanLog] Warning: Rust binary not found.\nPlugin is disabled.", vim.log.levels.WARN)
         end)
         return nil
     end

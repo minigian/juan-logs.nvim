@@ -1,0 +1,41 @@
+name: Release Binaries
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            cargo_out: target/release/libjuanlog.so
+            release_name: libjuanlog-linux.so
+          - os: macos-latest
+            cargo_out: target/release/libjuanlog.dylib
+            release_name: libjuanlog-macos.dylib
+          - os: windows-latest
+            cargo_out: target/release/juanlog.dll
+            release_name: libjuanlog-windows.dll
+
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        
+      - name: Build release
+        run: cargo build --release
+        
+      - name: Rename binary for release
+        shell: bash
+        run: mv ${{ matrix.cargo_out }} ${{ matrix.release_name }}
+        
+      - name: Upload to GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: ${{ matrix.release_name }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

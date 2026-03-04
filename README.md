@@ -52,7 +52,7 @@ Using **lazy.nvim**:
 ```lua
 {
     "minigian/juan-logs.nvim",
-    build = "cargo build --release",
+    build = ":luafile build.lua", -- or "cargo build --release" if you have cargo
     config = function()
         require("juanlog").setup({
             threshold_size = 1024 * 1024 * 100, -- 100MB
