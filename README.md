@@ -71,7 +71,7 @@ Using **lazy.nvim**:
 When a file exceeds the `threshold_size`, it opens in dynamic mode. Since only a small chunk of the file is loaded in RAM, standard Vim search and navigation won't work across the entire file. Use the following instead:
 
 ### Commands
-- `:Logfind <query>` - Search for a string across the entire file.
+- `:Logfind <query>` or `/<query>` - Search for a string across the entire file.
 - `:LogLines` - Print the total number of lines in the file.
 - `:LogJump <line>` - Teleport to an absolute line number.
 
@@ -87,6 +87,7 @@ Consider this a proof of concept. This software does NOT perform magic; opening 
 Feel free to report any issue. PRs are welcome.
 
 I'm tired...
+
 
 
 
