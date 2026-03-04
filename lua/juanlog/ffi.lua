@@ -22,7 +22,7 @@ local function get_lib_path()
     local ext = sysname == "Windows_NT" and "dll" or (sysname == "Darwin" and "dylib" or "so")
     local lib_name = "libjuanlog." .. ext
 
-    -- check local dev path first, useful for debugging without reinstalling
+    -- check local dev path first
     local local_dev_path = vim.fn.stdpath("config") .. "/lua/juan_log/bin/" .. lib_name
     if vim.loop.fs_stat(local_dev_path) then
         return local_dev_path
