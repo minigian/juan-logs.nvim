@@ -52,7 +52,10 @@ Using **lazy.nvim**:
 ```lua
 {
     "minigian/juan-logs.nvim",
-    build = ":luafile build.lua", -- or "cargo build --release" if you have cargo
+    build = function()
+        vim.fn.system({ "nvim", "--headless", "-l", "build.lua", "-c", "q" })
+    end,
+    -- You can use `build = "cargo build --release"` if you have `cargo` in your system
     config = function()
         require("juanlog").setup({
             threshold_size = 1024 * 1024 * 100, -- 100MB
@@ -63,6 +66,7 @@ Using **lazy.nvim**:
             syntax = false -- set to true to enable native vim syntax (can be slow on huge files)
         })
     end
+
 }
 ```
 
@@ -87,6 +91,7 @@ Consider this a proof of concept. This software does NOT perform magic; opening 
 Feel free to report any issue. PRs are welcome.
 
 I'm tired...
+
 
 
 
