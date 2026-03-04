@@ -26,18 +26,22 @@ function M.setup(user_config)
             else
                 vim.schedule(function()
                     if not vim.api.nvim_buf_is_valid(ev.buf) then return end
-                    
-                    vim.api.nvim_buf_call(ev.buf, function()
-                        local was_modifiable = vim.api.nvim_buf_get_option(ev.buf, 'modifiable')
-                        vim.api.nvim_buf_set_option(ev.buf, 'modifiable', true)
-                        
-                        -- fallback: just read it normally
+                    local bufnr = ev.buf
+                    vim.api.nvim_exec_autocmds("BufReadPre", { buffer = bufnr })
+
+                    vim.api.nvim_buf_call(bufnr, function()
+                        local was_modifiable = vim.bo[bufnr].modifiable
+                        vim.bo[bufnr].modifiable = true
+
+                        -- fallback: just read it normally (we're in BufReadCmd so default read was skipped)
                         vim.cmd('silent! read ' .. vim.fn.fnameescape(file))
                         vim.cmd('1delete _')
-                        
-                        vim.api.nvim_buf_set_option(ev.buf, 'modified', false)
-                        vim.api.nvim_buf_set_option(ev.buf, 'modifiable', was_modifiable)
+
+                        vim.bo[bufnr].modified = false
+                        vim.bo[bufnr].modifiable = was_modifiable
                     end)
+
+                    vim.api.nvim_exec_autocmds("BufReadPost", { buffer = bufnr })
                 end)
             end
         end
