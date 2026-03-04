@@ -3,8 +3,8 @@ use memmap2::Mmap;
 use rayon::prelude::*;
 use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Write};
-use std::ptr;
-use std::sync::{Arc, RwLock, atomic::{AtomicBool, AtomicUsize, Ordering}};
+use std::path::Path;
+use std::sync::{Arc, RwLock, atomic::{AtomicBool, AtomicUsize, AtomicIsize, Ordering}};
 use std::thread;
 
 use crate::models::{ChunkMeta, IndexState, Piece};
@@ -16,15 +16,18 @@ pub struct LogEngine {
     pub bytes_processed: Arc<AtomicUsize>,
     pub pieces: Vec<Piece>,
     pub memory_buffer: Vec<String>,
-    pub last_block: String, // persistent buffer to hand out safe pointers to C
     // atomic flags because users have no patience.
     pub is_saving: Arc<AtomicBool>,
     pub save_progress: Arc<AtomicUsize>,
     pub save_total: Arc<AtomicUsize>,
+    pub wasted_memory_lines: usize,
+    pub is_searching: Arc<AtomicBool>,
+    pub search_cancel: Arc<AtomicBool>,
+    pub search_result: Arc<AtomicIsize>,
 }
 
 impl LogEngine {
-    pub fn new(path: &str, lazy: bool) -> Result<Self, std::io::Error> {
+    pub fn new(path: &Path, lazy: bool) -> Result<Self, std::io::Error> {
         let file = File::open(path)?;
         let mmap = unsafe { memmap2::MmapOptions::new().map(&file)? };
 
@@ -57,10 +60,13 @@ impl LogEngine {
                 line_count: 0, // will be updated dynamically while indexing
             }],
             memory_buffer: Vec::new(),
-            last_block: String::new(),
             is_saving: Arc::new(AtomicBool::new(false)),
             save_progress: Arc::new(AtomicUsize::new(0)),
             save_total: Arc::new(AtomicUsize::new(0)),
+            wasted_memory_lines: 0,
+            is_searching: Arc::new(AtomicBool::new(false)),
+            search_cancel: Arc::new(AtomicBool::new(false)),
+            search_result: Arc::new(AtomicIsize::new(-1)),
         };
 
         if lazy {
@@ -369,10 +375,16 @@ impl LogEngine {
         while remaining_delete > 0 && piece_idx < self.pieces.len() {
             let count = self.pieces[piece_idx].line_count();
             if count <= remaining_delete {
+                if let Piece::Memory { .. } = self.pieces[piece_idx] {
+                    self.wasted_memory_lines += count;
+                }
                 self.pieces.remove(piece_idx);
                 remaining_delete -= count;
             } else {
                 // partial overlap, split and drop the front
+                if let Piece::Memory { .. } = self.pieces[piece_idx] {
+                    self.wasted_memory_lines += remaining_delete;
+                }
                 self.split_piece_at(piece_idx, remaining_delete);
                 self.pieces.remove(piece_idx);
                 remaining_delete = 0;
@@ -392,13 +404,32 @@ impl LogEngine {
                 self.pieces.insert(piece_idx, Piece::Memory { start_idx, line_count });
             }
         }
+
+        if self.wasted_memory_lines > 10000 {
+            self.compact_memory();
+        }
     }
 
-    pub fn get_block(&mut self, start_line: usize, num_lines: usize) -> *const u8 {
+    pub fn compact_memory(&mut self) {
+        let mut new_memory_buffer = Vec::new();
+        for piece in &mut self.pieces {
+            if let Piece::Memory { start_idx, line_count } = piece {
+                let new_start = new_memory_buffer.len();
+                for i in 0..*line_count {
+                    new_memory_buffer.push(self.memory_buffer[*start_idx + i].clone());
+                }
+                *start_idx = new_start;
+            }
+        }
+        self.memory_buffer = new_memory_buffer;
+        self.wasted_memory_lines = 0;
+    }
+
+    pub fn get_block(&mut self, start_line: usize, num_lines: usize) -> String {
         self.sync_pieces();
-        self.last_block.clear();
+        let mut block = String::new();
         if num_lines == 0 || start_line >= self.total_lines() {
-            return ptr::null();
+            return block;
         }
 
         let (mut piece_idx, mut offset) = self.find_piece_idx(start_line);
@@ -419,15 +450,15 @@ impl LogEngine {
                     
                     // logs are dirty. replace garbage bytes with  instead of failing silently.
                     let s = String::from_utf8_lossy(bytes);
-                    self.last_block.push_str(&s);
-                    if !self.last_block.ends_with('\n') && !self.last_block.is_empty() {
-                        self.last_block.push('\n');
+                    block.push_str(&s);
+                    if !block.ends_with('\n') && !block.is_empty() {
+                        block.push('\n');
                     }
                 }
                 Piece::Memory { start_idx, .. } => {
                     for i in 0..take {
-                        self.last_block.push_str(&self.memory_buffer[start_idx + offset + i]);
-                        self.last_block.push('\n');
+                        block.push_str(&self.memory_buffer[start_idx + offset + i]);
+                        block.push('\n');
                     }
                 }
             }
@@ -437,14 +468,14 @@ impl LogEngine {
         }
 
         // C side expects a pointer. this gets overwritten next call, DO NOT keep it around.
-        self.last_block.as_ptr()
+        block
     }
 
     // the magic trick for 'G'. reads backwards from the abyss without needing an index.
-    pub fn get_eof_block(&mut self, num_lines: usize) -> *const u8 {
-        self.last_block.clear();
+    pub fn get_eof_block(&mut self, num_lines: usize) -> String {
+        let mut block = String::new();
         if self.mmap.is_empty() || num_lines == 0 {
-            return ptr::null();
+            return block;
         }
 
         let mut newlines_found = 0;
@@ -463,16 +494,16 @@ impl LogEngine {
 
         let bytes = &self.mmap[start_byte..];
         let s = String::from_utf8_lossy(bytes);
-        self.last_block.push_str(&s);
-        if !self.last_block.ends_with('\n') && !self.last_block.is_empty() {
-            self.last_block.push('\n');
+        block.push_str(&s);
+        if !block.ends_with('\n') && !block.is_empty() {
+            block.push('\n');
         }
 
-        self.last_block.as_ptr()
+        block
     }
 
-    pub fn save(&self, path: &str) -> bool {
-        let temp_path = format!("{}.tmp", path);
+    pub fn save(&self, path: &Path) -> bool {
+        let temp_path = format!("{}.tmp", path.to_string_lossy());
         let file = match OpenOptions::new().write(true).create(true).truncate(true).open(&temp_path) {
             Ok(f) => f,
             Err(_) => return false,
@@ -513,12 +544,12 @@ impl LogEngine {
     }
 
     // clone the world and run away to a background thread.
-    pub fn save_async(&self, path: &str) -> bool {
+    pub fn save_async(&self, path: &Path) -> bool {
         if self.is_saving.swap(true, Ordering::SeqCst) {
             return false; 
         }
 
-        let path = path.to_string();
+        let path_buf = path.to_path_buf();
         let pieces = self.pieces.clone();
         let memory_buffer = self.memory_buffer.clone();
         let mmap = self.mmap.clone();
@@ -548,7 +579,7 @@ impl LogEngine {
         save_progress.store(0, Ordering::Relaxed);
 
         thread::spawn(move || {
-            let temp_path = format!("{}.tmp", path);
+            let temp_path = format!("{}.tmp", path_buf.to_string_lossy());
             let file = match OpenOptions::new().write(true).create(true).truncate(true).open(&temp_path) {
                 Ok(f) => f,
                 Err(_) => {
@@ -576,6 +607,7 @@ impl LogEngine {
                                 let chunk = &mmap[current_offset..next_offset];
                                 
                                 if writer.write_all(chunk).is_err() {
+                                    let _ = std::fs::remove_file(&temp_path);
                                     break; // disk is probably full. rip.
                                 }
                                 
@@ -592,22 +624,117 @@ impl LogEngine {
                     Piece::Memory { start_idx, line_count } => {
                         for i in 0..*line_count {
                             let line_bytes = memory_buffer[*start_idx + i].as_bytes();
-                            if writer.write_all(line_bytes).is_ok() {
-                                let _ = writer.write_all(b"\n");
-                                current_progress += line_bytes.len() + 1;
-                                save_progress.store(current_progress, Ordering::Relaxed);
+                            if writer.write_all(line_bytes).is_err() || writer.write_all(b"\n").is_err() {
+                                let _ = std::fs::remove_file(&temp_path);
+                                break;
                             }
+                            current_progress += line_bytes.len() + 1;
+                            save_progress.store(current_progress, Ordering::Relaxed);
                         }
                     }
                 }
             }
 
             if writer.flush().is_ok() {
-                let _ = std::fs::rename(&temp_path, path);
+                let _ = std::fs::rename(&temp_path, path_buf);
             }
             is_saving.store(false, Ordering::SeqCst);
         });
 
         true
+    }
+
+    // Lock-free asynchronous black magic.
+    pub fn search_async(&self, query: &str, start_line: usize) {
+        if self.is_searching.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        self.search_cancel.store(false, Ordering::SeqCst);
+        self.search_result.store(-1, Ordering::SeqCst);
+
+        let query_bytes = query.as_bytes().to_vec();
+        if query_bytes.is_empty() {
+            self.is_searching.store(false, Ordering::SeqCst);
+            return;
+        }
+
+        let pieces = self.pieces.clone();
+        let memory_buffer = self.memory_buffer.clone();
+        let mmap = self.mmap.clone();
+        let index = self.index.clone();
+        let bytes_processed = self.bytes_processed.clone();
+        let is_searching = self.is_searching.clone();
+        let search_cancel = self.search_cancel.clone();
+        let search_result = self.search_result.clone();
+
+        let mut current_logical = 0;
+        let mut start_piece_idx = pieces.len();
+        let mut start_offset = 0;
+        for (idx, piece) in pieces.iter().enumerate() {
+            let count = piece.line_count();
+            if start_line < current_logical + count {
+                start_piece_idx = idx;
+                start_offset = start_line - current_logical;
+                break;
+            }
+            current_logical += count;
+        }
+        
+        let mut current_line = start_line;
+
+        thread::spawn(move || {
+            for piece_idx in start_piece_idx..pieces.len() {
+                if search_cancel.load(Ordering::Relaxed) {
+                    break;
+                }
+
+                let piece = &pieces[piece_idx];
+                let offset = if piece_idx == start_piece_idx { start_offset } else { 0 };
+
+                let mut piece_bytes: Vec<u8> = Vec::new();
+                match piece {
+                    Piece::Original { start_line: p_start, line_count } => {
+                        let start_byte = LogEngine::calc_offset(&index, &bytes_processed, &mmap, p_start + offset);
+                        let end_byte = LogEngine::calc_offset(&index, &bytes_processed, &mmap, p_start + line_count);
+                        let end_byte = end_byte.min(mmap.len());
+                        if start_byte < end_byte {
+                            piece_bytes.extend_from_slice(&mmap[start_byte..end_byte]);
+                        }
+                    }
+                    Piece::Memory { start_idx, line_count } => {
+                        for i in offset..*line_count {
+                            piece_bytes.extend_from_slice(memory_buffer[*start_idx + i].as_bytes());
+                            piece_bytes.push(b'\n');
+                        }
+                    }
+                }
+
+                if let Some(pos) = memchr::memmem::find(&piece_bytes, &query_bytes) {
+                    let slice_to_match = &piece_bytes[..pos];
+                    let mut lines = 0;
+                    let mut iter = memchr::memchr2_iter(b'\n', b'\r', slice_to_match).peekable();
+                    while let Some(p) = iter.next() {
+                        lines += 1;
+                        if slice_to_match[p] == b'\r' {
+                            if let Some(&np) = iter.peek() {
+                                if np == p + 1 && slice_to_match[np] == b'\n' {
+                                    iter.next();
+                                }
+                            }
+                        }
+                    }
+                    
+                    let match_start = current_line + lines;
+                    search_result.store(match_start as isize, Ordering::SeqCst);
+                    is_searching.store(false, Ordering::SeqCst);
+                    return;
+                }
+
+                current_line += piece.line_count() - offset;
+            }
+
+            search_result.store(-2, Ordering::SeqCst);
+            is_searching.store(false, Ordering::SeqCst);
+        });
     }
 }

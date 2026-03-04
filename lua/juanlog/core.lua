@@ -29,15 +29,17 @@ end
 function M.fetch_lines(engine, start, count)
     local lib = ffi_mod.get_lib()
     local len_ptr = ffi.new("size_t[1]")
-    -- this pointer is only valid until the next call to rust. copy immediately.
-    local block_ptr = lib.log_engine_get_block(engine, start, count, len_ptr)
+    local max_len = 5 * 1024 * 1024
+    local buffer = ffi.new("char[?]", max_len)
     
-    if block_ptr == nil then return {} end
+    local success = lib.log_engine_get_block(engine, start, count, buffer, max_len, len_ptr)
+    
+    if not success then return {} end
     
     local length = tonumber(len_ptr[0])
     if length == 0 then return {} end
 
-    local raw_text = ffi.string(block_ptr, length)
+    local raw_text = ffi.string(buffer, length)
     
     -- clean up trailing newlines from the block fetch
     if raw_text:sub(-1) == "\n" then raw_text = raw_text:sub(1, -2) end
@@ -49,14 +51,17 @@ end
 function M.fetch_eof_lines(engine, count)
     local lib = ffi_mod.get_lib()
     local len_ptr = ffi.new("size_t[1]")
-    local block_ptr = lib.log_engine_get_eof_block(engine, count, len_ptr)
+    local max_len = 5 * 1024 * 1024
+    local buffer = ffi.new("char[?]", max_len)
     
-    if block_ptr == nil then return {} end
+    local success = lib.log_engine_get_eof_block(engine, count, buffer, max_len, len_ptr)
+    
+    if not success then return {} end
     
     local length = tonumber(len_ptr[0])
     if length == 0 then return {} end
 
-    local raw_text = ffi.string(block_ptr, length)
+    local raw_text = ffi.string(buffer, length)
     if raw_text:sub(-1) == "\n" then raw_text = raw_text:sub(1, -2) end
     if raw_text:sub(-1) == "\r" then raw_text = raw_text:sub(1, -2) end
     

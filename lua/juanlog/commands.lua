@@ -6,14 +6,9 @@ local M = {}
 function M.setup_commands(bufnr)
     local lib = ffi_mod.get_lib()
 
-    -- standard / search won't work because lines aren't loaded.
-    -- implementing custom search commands that query the engine.
-    vim.api.nvim_buf_create_user_command(bufnr, "Logfind", function(opts)
+    local function do_search(query)
         local state = _G.JuanLogStates[bufnr]
-        if not state then return end
-
-        local query = opts.args
-        if query == "" then return end
+        if not state or not query or query == "" then return end
         
         if state.indexing_progress < 1.0 then
             vim.notify("[JuanLog] Searching only in the indexed " .. math.floor(state.indexing_progress * 100) .. "%...", vim.log.levels.WARN)
@@ -54,7 +49,22 @@ function M.setup_commands(bufnr)
         if target_line >= 0 then
             core.jump_to_line(bufnr, state, target_line)
         end
+    end
+
+    -- standard / search won't work because lines aren't loaded.
+    -- implementing custom search commands that query the engine.
+    vim.api.nvim_buf_create_user_command(bufnr, "Logfind", function(opts)
+        do_search(opts.args)
     end, { nargs = 1 })
+    
+    -- More similar to Neovim, you're welcome
+    vim.keymap.set("n", "/", function()
+        vim.ui.input({ prompt = "/" }, function(input)
+            if input then
+                do_search(input)
+            end
+        end)
+    end, { buffer = bufnr, silent = true })
 
     -- how many lines did we actually parse?
     vim.api.nvim_buf_create_user_command(bufnr, "LogLines", function()

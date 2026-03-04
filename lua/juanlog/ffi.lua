@@ -6,8 +6,8 @@ ffi.cdef [[
     LogEngine* log_engine_new(const char* path, bool lazy);
     float log_engine_get_progress(const LogEngine* engine);
     size_t log_engine_total_lines(LogEngine* engine);
-    const char* log_engine_get_block(LogEngine* engine, size_t start_line, size_t num_lines, size_t* out_len);
-    const char* log_engine_get_eof_block(LogEngine* engine, size_t num_lines, size_t* out_len);
+    bool log_engine_get_block(LogEngine* engine, size_t start_line, size_t num_lines, char* out_buffer, size_t max_len, size_t* out_len);
+    bool log_engine_get_eof_block(LogEngine* engine, size_t num_lines, char* out_buffer, size_t max_len, size_t* out_len);
     void log_engine_apply_edit(LogEngine* engine, size_t start_line, size_t num_deleted, const char* new_text);
     bool log_engine_save(const LogEngine* engine, const char* path);
     bool log_engine_save_async(const LogEngine* engine, const char* path);

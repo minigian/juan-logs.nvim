@@ -1,11 +1,27 @@
+// Abandon all hope, ye who enter here.
 use std::ffi::CStr;
 use std::os::raw::c_char;
+use std::path::Path;
 use std::ptr;
 use std::sync::atomic::Ordering;
 use memchr::{memchr2_iter, memmem};
 
+#[cfg(unix)]
+use std::os::unix::ffi::OsStrExt;
+
 use crate::core::LogEngine;
 use crate::models::Piece;
+
+fn cstr_to_path<'a>(c_str: &'a CStr) -> &'a Path {
+    #[cfg(unix)]
+    {
+        Path::new(std::ffi::OsStr::from_bytes(c_str.to_bytes()))
+    }
+    #[cfg(not(unix))]
+    {
+        Path::new(std::str::from_utf8(c_str.to_bytes()).unwrap_or_default())
+    }
+}
 
 // --- C ABI Boundary ---
 // Trusting the caller from here on out. standard unsafe boilerplate.
@@ -17,8 +33,8 @@ pub extern "C" fn log_engine_new(path: *const c_char, lazy: bool) -> *mut LogEng
     }
     let c_str = unsafe { CStr::from_ptr(path) };
     // paths can be cursed too on some OSes.
-    let path_str = c_str.to_string_lossy();
-    if let Ok(engine) = LogEngine::new(path_str.as_ref(), lazy) {
+    let file_path = cstr_to_path(c_str);
+    if let Ok(engine) = LogEngine::new(file_path, lazy) {
         return Box::into_raw(Box::new(engine));
     }
     ptr::null_mut()
@@ -58,37 +74,63 @@ pub extern "C" fn log_engine_get_block(
     engine: *mut LogEngine,
     start_line: usize,
     num_lines: usize,
+    out_buffer: *mut c_char,
+    max_len: usize,
     out_len: *mut usize,
-) -> *const u8 {
+) -> bool {
     // the thing behind :LogJump and scrolling. fetches chunks without loading the whole file.
     let engine = unsafe {
-        if engine.is_null() {
-            return ptr::null();
+        if engine.is_null() || out_buffer.is_null() || max_len == 0 {
+            return false;
         }
         &mut *engine
     };
-    let ptr = engine.get_block(start_line, num_lines);
-    if !out_len.is_null() {
-        unsafe { *out_len = engine.last_block.len() };
+    let block = engine.get_block(start_line, num_lines);
+    let mut bytes = block.into_bytes();
+    
+    for b in &mut bytes {
+        if *b == 0 { *b = b' '; }
     }
-    ptr
+    
+    let copy_len = std::cmp::min(bytes.len(), max_len - 1);
+    unsafe {
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), out_buffer as *mut u8, copy_len);
+        *out_buffer.add(copy_len) = 0;
+        if !out_len.is_null() {
+            *out_len = copy_len;
+        }
+    }
+    true
 }
 
 #[no_mangle]
 pub extern "C" fn log_engine_get_eof_block(
     engine: *mut LogEngine,
     num_lines: usize,
+    out_buffer: *mut c_char,
+    max_len: usize,
     out_len: *mut usize,
-) -> *const u8 {
+) -> bool {
     let engine = unsafe {
-        if engine.is_null() { return ptr::null(); }
+        if engine.is_null() || out_buffer.is_null() || max_len == 0 { return false; }
         &mut *engine
     };
-    let ptr = engine.get_eof_block(num_lines);
-    if !out_len.is_null() {
-        unsafe { *out_len = engine.last_block.len() };
+    let block = engine.get_eof_block(num_lines);
+    let mut bytes = block.into_bytes();
+    
+    for b in &mut bytes {
+        if *b == 0 { *b = b' '; }
     }
-    ptr
+    
+    let copy_len = std::cmp::min(bytes.len(), max_len - 1);
+    unsafe {
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), out_buffer as *mut u8, copy_len);
+        *out_buffer.add(copy_len) = 0;
+        if !out_len.is_null() {
+            *out_len = copy_len;
+        }
+    }
+    true
 }
 
 #[no_mangle]
@@ -125,8 +167,9 @@ pub extern "C" fn log_engine_save(engine: *const LogEngine, path: *const c_char)
         return false;
     }
     // paths can be cursed too.
-    let path_str = unsafe { CStr::from_ptr(path) }.to_string_lossy();
-    return engine.save(path_str.as_ref());
+    let c_str = unsafe { CStr::from_ptr(path) };
+    let file_path = cstr_to_path(c_str);
+    return engine.save(file_path);
 }
 
 // FFI for the async save. don't block the UI.
@@ -137,8 +180,9 @@ pub extern "C" fn log_engine_save_async(engine: *const LogEngine, path: *const c
         &*engine
     };
     if path.is_null() { return false; }
-    let path_str = unsafe { CStr::from_ptr(path) }.to_string_lossy();
-    engine.save_async(path_str.as_ref())
+    let c_str = unsafe { CStr::from_ptr(path) };
+    let file_path = cstr_to_path(c_str);
+    engine.save_async(file_path)
 }
 
 // returns -1.0 if not saving, otherwise 0.0 to 1.0
@@ -312,4 +356,40 @@ pub extern "C" fn log_engine_free(engine: *mut LogEngine) {
             // just long enough for the background thread to exit cleanly.
         }
     }
+}
+
+#[no_mangle]
+pub extern "C" fn log_engine_search_async(
+    engine: *mut LogEngine,
+    query: *const c_char,
+    start_line: usize,
+) {
+    let engine = unsafe {
+        if engine.is_null() { return; }
+        &mut *engine
+    };
+    if query.is_null() { return; }
+    let query_str = unsafe { CStr::from_ptr(query) }.to_string_lossy();
+    engine.search_async(query_str.as_ref(), start_line);
+}
+
+#[no_mangle]
+pub extern "C" fn log_engine_get_search_status(engine: *const LogEngine) -> isize {
+    let engine = unsafe {
+        if engine.is_null() { return -2; }
+        &*engine
+    };
+    if engine.is_searching.load(Ordering::SeqCst) {
+        return -1;
+    }
+    engine.search_result.load(Ordering::SeqCst)
+}
+
+#[no_mangle]
+pub extern "C" fn log_engine_cancel_search(engine: *mut LogEngine) {
+    let engine = unsafe {
+        if engine.is_null() { return; }
+        &mut *engine
+    };
+    engine.search_cancel.store(true, Ordering::SeqCst);
 }
