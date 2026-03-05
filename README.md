@@ -52,8 +52,11 @@ Using **lazy.nvim**:
 ```lua
 {
     "minigian/juan-logs.nvim",
-    build = function()
-        vim.fn.system({ "nvim", "--headless", "-l", "build.lua", "-c", "q" })
+    build = function(plugin)
+        local path = plugin.dir .. "/build.lua"
+        if vim.fn.filereadable(path) == 1 then
+            dofile(path)
+        end
     end,
     -- You can use `build = "cargo build --release"` if you have `cargo` in your system
     config = function()
@@ -66,7 +69,6 @@ Using **lazy.nvim**:
             syntax = false -- set to true to enable native vim syntax (can be slow on huge files)
         })
     end
-
 }
 ```
 
@@ -91,6 +93,7 @@ Consider this a proof of concept. This software does NOT perform magic; opening 
 Feel free to report any issue. PRs are welcome.
 
 I'm tired...
+
 
 
 
