@@ -51,7 +51,7 @@ A: No. We hijack the native `:w` command and perform an async save in a backgrou
 - Have a screen
 - Motherboard
 - electricity (if you don't have, I'm sorry)
-Optinal:
+#### Optinal:
 - Cargo/Rust (for compiling, but not required due to the pre-compiled binaries in the repo)
 
 ## Installation
@@ -111,3 +111,4 @@ Feel free to report any issue. PRs are welcome.
 <img width="1911" height="1004" alt="image" src="https://github.com/user-attachments/assets/082162a4-168d-44b7-8102-a3454775a947" />
 
 Good enough. 111GBs in 200 seconds, Pretty fast and I can't go any further.
+
