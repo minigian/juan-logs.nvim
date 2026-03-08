@@ -15,7 +15,7 @@ _G._juan_log_statuscol = function()
     local st = _G.JuanLogStates[b]
     
     if st and config.mode == "dynamic" then
-        if st.indexing_progress < 1.0 then
+        if not config.lazy and st.indexing_progress < 1.0 then
             return "%=~ "
         elseif st.is_eof_mode then
             return "%=~ "
@@ -120,6 +120,11 @@ end
 
 -- "teleport" the visible window to a new location in the huge file
 function M.jump_to_line(bufnr, state, found_line)
+    if state.indexing_progress < 1.0 and found_line >= state.total then
+        vim.notify("[JuanLog] Target line is not indexed yet.", vim.log.levels.WARN)
+        return
+    end
+
     local half_chunk = math.floor(config.dynamic_chunk_size / 2)
     local new_offset = math.max(0, found_line - half_chunk)
 

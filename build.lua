@@ -20,13 +20,13 @@ local function build()
 
     local script_path = debug.getinfo(1, "S").source:sub(2)
     local plugin_root = vim.fn.fnamemodify(script_path, ":h")
-    local bin_dir = plugin_root .. "/bin"
+    local lib_dir = plugin_root .. "/lib"
 
-    if vim.fn.isdirectory(bin_dir) == 0 then
-        vim.fn.mkdir(bin_dir, "p")
+    if vim.fn.isdirectory(lib_dir) == 0 then
+        vim.fn.mkdir(lib_dir, "p")
     end
 
-    local out_file = string.format("%s/libjuanlog.%s", bin_dir, ext)
+    local out_file = string.format("%s/libjuanlog.%s", lib_dir, ext)
 
     print("[JuanLog] Fetching pre-built binary for " .. os_name .. "...")
 
@@ -54,7 +54,12 @@ local function build()
             
             vim.fn.system(build_cmd)
             
-            local target_bin = string.format("%s/target/release/libjuanlog.%s", plugin_root, ext)
+            local cargo_output_name = "libjuanlog." .. ext
+            if os_name == "windows" then
+                cargo_output_name = "juanlog.dll"
+            end
+            
+            local target_bin = string.format("%s/target/release/%s", plugin_root, cargo_output_name)
             if vim.fn.filereadable(target_bin) == 1 then
                 uv.fs_copyfile(target_bin, out_file)
                 print("[JuanLog] Local build finished.")

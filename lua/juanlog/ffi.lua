@@ -3,6 +3,14 @@ local ffi = require("ffi")
 -- keep this in sync with the rust struct/externs or segfaults will happen.
 ffi.cdef [[
     typedef struct LogEngine LogEngine;
+    
+    typedef struct {
+        float progress;
+        size_t total_lines;
+        size_t file_size_bytes;
+        uint64_t indexing_time_ms;
+    } LogStats;
+
     LogEngine* log_engine_new(const char* path, bool lazy);
     float log_engine_get_progress(const LogEngine* engine);
     size_t log_engine_total_lines(LogEngine* engine);
@@ -12,8 +20,9 @@ ffi.cdef [[
     bool log_engine_save(const LogEngine* engine, const char* path);
     bool log_engine_save_async(const LogEngine* engine, const char* path);
     float log_engine_get_save_progress(const LogEngine* engine);
-    ptrdiff_t log_engine_search(LogEngine* engine, const char* query, size_t start_line);
-    ptrdiff_t log_engine_search_backward(LogEngine* engine, const char* query, size_t start_line);
+    ptrdiff_t log_engine_search(LogEngine* engine, const char* query, size_t start_line, size_t end_line);
+    ptrdiff_t log_engine_search_backward(LogEngine* engine, const char* query, size_t start_line, size_t end_line);
+    bool log_engine_get_stats(const LogEngine* engine, LogStats* out_stats);
     void log_engine_free(LogEngine* engine);
 ]]
 
@@ -22,8 +31,8 @@ local function get_lib_path()
     local ext = sysname == "Windows_NT" and "dll" or (sysname == "Darwin" and "dylib" or "so")
     local lib_name = "libjuanlog." .. ext
 
-    -- check local dev path first
-    local local_dev_path = vim.fn.stdpath("config") .. "/lua/juan_log/bin/" .. lib_name
+    -- shoutout to no_brains101 for reminding me that libraries go in lib/, not bin/.
+    local local_dev_path = vim.fn.stdpath("config") .. "/lua/juan_log/lib/" .. lib_name
     if vim.loop.fs_stat(local_dev_path) then
         return local_dev_path
     end
@@ -31,13 +40,17 @@ local function get_lib_path()
     local str = debug.getinfo(1, "S").source:sub(2)
     local plugin_root = str:match("(.*[/\\])"):gsub("lua[/\\]juanlog[/\\]$", "")
 
-    local prebuilt_path = plugin_root .. "bin/" .. lib_name
+    local prebuilt_path = plugin_root .. "lib/" .. lib_name
     if vim.loop.fs_stat(prebuilt_path) then
         return prebuilt_path
     end
 
     -- fallback to release path
-    return plugin_root .. "target/release/" .. lib_name
+    local cargo_output_name = "libjuanlog." .. ext
+    if sysname == "Windows_NT" then
+        cargo_output_name = "juanlog.dll"
+    end
+    return plugin_root .. "target/release/" .. cargo_output_name
 end
 
 -- lazy load the rust binary. don't penalize startup time for files we don't care about.

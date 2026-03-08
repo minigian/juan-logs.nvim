@@ -133,7 +133,7 @@ local function attach_buffer_events(bufnr, state, filepath)
     })
 end
 
-local function finish_indexing(bufnr, state, filepath)
+local function finish_indexing(bufnr, state, filepath, is_complete)
     local lib = ffi_mod.get_lib()
     state.total = tonumber(lib.log_engine_total_lines(state.engine))
     
@@ -147,7 +147,12 @@ local function finish_indexing(bufnr, state, filepath)
     vim.cmd("redraw!")
 
     vim.api.nvim_buf_set_option(bufnr, 'modifiable', true)
-    vim.notify("[JuanLog] Indexing complete. Total lines: " .. state.total, vim.log.levels.INFO)
+    
+    if is_complete then
+        vim.notify("[JuanLog] Indexing complete. Total lines: " .. state.total, vim.log.levels.INFO)
+    else
+        vim.notify("[JuanLog] File opened on-demand. Indexing in background...", vim.log.levels.INFO)
+    end
 
     attach_buffer_events(bufnr, state, filepath)
 end
@@ -162,7 +167,7 @@ local function setup_dynamic_window(bufnr, engine, total_lines, filepath)
         updating = false, -- semaphore to prevent recursion loops
         last_query = nil,
         timer = vim.loop.new_timer(),
-        indexing_progress = config.lazy and 0.0 or 1.0,
+        indexing_progress = 0.0,
         is_eof_mode = false,
         poll_timer = nil,
         save_progress = -1.0,
@@ -183,7 +188,7 @@ local function setup_dynamic_window(bufnr, engine, total_lines, filepath)
     local progress = lib.log_engine_get_progress(engine)
     state.indexing_progress = progress
 
-    if config.lazy and progress < 1.0 then
+    if not config.lazy and progress < 1.0 then
         vim.api.nvim_buf_set_option(bufnr, 'modifiable', false)
         core.force_set_lines(bufnr, 0, -1, false, { string.format("[INDEXING... %d%%]", math.floor(progress * 100)) })
         
@@ -201,13 +206,38 @@ local function setup_dynamic_window(bufnr, engine, total_lines, filepath)
             if p >= 1.0 then
                 state.poll_timer:stop()
                 state.poll_timer:close()
-                finish_indexing(bufnr, state, filepath)
+                finish_indexing(bufnr, state, filepath, true)
             else
                 core.force_set_lines(bufnr, 0, -1, false, { string.format("[INDEXING... %d%%]", math.floor(p * 100)) })
             end
         end))
     else
-        finish_indexing(bufnr, state, filepath)
+        finish_indexing(bufnr, state, filepath, progress >= 1.0)
+        
+        if progress < 1.0 then
+            state.poll_timer = vim.loop.new_timer()
+            state.poll_timer:start(100, 100, vim.schedule_wrap(function()
+                if not vim.api.nvim_buf_is_valid(bufnr) then
+                    state.poll_timer:stop()
+                    state.poll_timer:close()
+                    return
+                end
+                
+                local p = lib.log_engine_get_progress(state.engine)
+                state.indexing_progress = p
+                state.total = tonumber(lib.log_engine_total_lines(state.engine))
+                
+                if p >= 1.0 then
+                    state.poll_timer:stop()
+                    state.poll_timer:close()
+                    vim.notify("[JuanLog] Indexing complete. Total lines: " .. state.total, vim.log.levels.INFO)
+                    if state.is_eof_mode then
+                        core.jump_to_eof(bufnr, state)
+                    end
+                end
+                vim.cmd("redrawstatus")
+            end))
+        end
     end
 end
 

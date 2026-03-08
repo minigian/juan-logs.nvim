@@ -28,4 +28,5 @@ pub struct IndexState {
     pub chunks: Vec<ChunkMeta>,
     pub original_total_lines: usize,
     pub is_finished: bool,
+    pub indexing_time_ms: u128, // how long did the background thread take to eat the file?
 }

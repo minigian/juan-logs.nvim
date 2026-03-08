@@ -4,7 +4,7 @@ use std::os::raw::c_char;
 use std::path::Path;
 use std::ptr;
 use std::sync::atomic::Ordering;
-use memchr::{memchr2_iter, memmem};
+use memchr::memmem;
 
 #[cfg(unix)]
 use std::os::unix::ffi::OsStrExt;
@@ -202,9 +202,10 @@ pub extern "C" fn log_engine_get_save_progress(engine: *const LogEngine) -> f32 
 
 #[no_mangle]
 pub extern "C" fn log_engine_search(
-    engine: *mut LogEngine, // changed to mut so we can sync pieces
+    engine: *mut LogEngine,
     query: *const c_char,
     start_line: usize,
+    end_line: usize, // Bounded search to prevent the PC from melting
 ) -> isize {
     let engine = unsafe {
         if engine.is_null() {
@@ -228,41 +229,34 @@ pub extern "C" fn log_engine_search(
     let mut current_logical = start_line;
 
     while piece_idx < engine.pieces.len() {
+        if current_logical > end_line {
+            break; // User's patience limit reached
+        }
+
         let piece = &engine.pieces[piece_idx];
+        let available_lines = piece.line_count() - offset;
+        let lines_to_search = std::cmp::min(available_lines, end_line.saturating_sub(current_logical) + 1);
+
         match piece {
-            Piece::Original { start_line: p_start, line_count } => {
-                let bytes = engine.get_original_bytes(p_start + offset, line_count - offset);
+            Piece::Original { start_line: p_start, .. } => {
+                let bytes = engine.get_original_bytes(p_start + offset, lines_to_search);
                 if let Some(pos) = memmem::find(bytes, query_bytes) {
-                    
-                    // found the byte offset, now manually count newlines up to this point
-                    // to resolve the actual logical line number. slow but accurate.
-                    let slice_to_match = &bytes[..pos];
-                    let mut lines = 0;
-                    let mut iter = memchr2_iter(b'\n', b'\r', slice_to_match).peekable();
-                    while let Some(p) = iter.next() {
-                        lines += 1;
-                        if slice_to_match[p] == b'\r' {
-                            if let Some(&np) = iter.peek() {
-                                if np == p + 1 && slice_to_match[np] == b'\n' {
-                                    iter.next();
-                                }
-                            }
-                        }
-                    }
+                    // AVX2 goes brrrrr on search now. No more slow iterators.
+                    let lines = crate::core::count_newlines(&bytes[..pos]);
                     return (current_logical + lines) as isize;
                 }
             }
-            Piece::Memory { start_idx, line_count } => {
+            Piece::Memory { start_idx, .. } => {
                 // query might be cursed too.
                 let q_str = String::from_utf8_lossy(query_bytes);
-                for i in offset..*line_count {
-                    if engine.memory_buffer[start_idx + i].contains(q_str.as_ref()) {
-                        return (current_logical + i - offset) as isize;
+                for i in 0..lines_to_search {
+                    if engine.memory_buffer[start_idx + offset + i].contains(q_str.as_ref()) {
+                        return (current_logical + i) as isize;
                     }
                 }
             }
         }
-        current_logical += piece.line_count() - offset;
+        current_logical += available_lines;
         offset = 0;
         piece_idx += 1;
     }
@@ -271,9 +265,10 @@ pub extern "C" fn log_engine_search(
 
 #[no_mangle]
 pub extern "C" fn log_engine_search_backward(
-    engine: *mut LogEngine, // changed to mut so we can sync pieces
+    engine: *mut LogEngine,
     query: *const c_char,
     start_line: usize,
+    end_line: usize, // The floor of our search
 ) -> isize {
     let engine = unsafe {
         if engine.is_null() {
@@ -301,35 +296,31 @@ pub extern "C" fn log_engine_search_backward(
 
     let mut current_logical = start_line;
 
-    // walking backwards through pieces. same logic as forward search but reversed.
+    // walking backwards through pieces.
     loop {
+        let piece_start_logical = current_logical.saturating_sub(offset);
+        if current_logical < end_line { 
+            break; // Hit the floor
+        }
+
         let piece = &engine.pieces[piece_idx];
+        let skip = if end_line > piece_start_logical { end_line - piece_start_logical } else { 0 };
+        let lines_to_fetch = offset + 1 - skip;
+
         match piece {
             Piece::Original { start_line: p_start, .. } => {
-                let bytes = engine.get_original_bytes(*p_start, offset + 1);
+                let bytes = engine.get_original_bytes(p_start + skip, lines_to_fetch);
                 if let Some(pos) = memmem::rfind(bytes, query_bytes) {
-                    let slice_to_match = &bytes[..pos];
-                    let mut lines = 0;
-                    let mut iter = memchr2_iter(b'\n', b'\r', slice_to_match).peekable();
-                    while let Some(p) = iter.next() {
-                        lines += 1;
-                        if slice_to_match[p] == b'\r' {
-                            if let Some(&np) = iter.peek() {
-                                if np == p + 1 && slice_to_match[np] == b'\n' {
-                                    iter.next();
-                                }
-                            }
-                        }
-                    }
-                    return (current_logical - offset + lines) as isize;
+                    // AVX2 backwards. Still fast.
+                    let lines = crate::core::count_newlines(&bytes[..pos]);
+                    return (piece_start_logical + skip + lines) as isize;
                 }
             }
             Piece::Memory { start_idx, .. } => {
-                // query might be cursed too.
                 let q_str = String::from_utf8_lossy(query_bytes);
-                for i in (0..=offset).rev() {
+                for i in (skip..=offset).rev() {
                     if engine.memory_buffer[start_idx + i].contains(q_str.as_ref()) {
-                        return (current_logical - offset + i) as isize;
+                        return (piece_start_logical + i) as isize;
                     }
                 }
             }
@@ -338,11 +329,43 @@ pub extern "C" fn log_engine_search_backward(
         if piece_idx == 0 {
             break;
         }
-        current_logical = current_logical.saturating_sub(offset + 1);
         piece_idx -= 1;
         offset = engine.pieces[piece_idx].line_count().saturating_sub(1);
+        current_logical = piece_start_logical.saturating_sub(1);
     }
     -1
+}
+
+#[repr(C)]
+pub struct LogStats {
+    pub progress: f32,
+    pub total_lines: usize,
+    pub file_size_bytes: usize,
+    pub indexing_time_ms: u64,
+}
+
+#[no_mangle]
+pub extern "C" fn log_engine_get_stats(engine: *const LogEngine, out_stats: *mut LogStats) -> bool {
+    let engine = unsafe {
+        if engine.is_null() || out_stats.is_null() { return false; }
+        &*engine
+    };
+    
+    let idx = engine.index.read().unwrap();
+    let processed = engine.bytes_processed.load(Ordering::Relaxed) as f32;
+    let total = engine.mmap.len() as f32;
+    
+    let progress = if idx.is_finished { 1.0 } else if total == 0.0 { 1.0 } else { processed / total };
+    
+    unsafe {
+        (*out_stats).progress = progress;
+        // We don't call sync_pieces here because we only have a const pointer.
+        // Summing the pieces gives us the currently synced total, which is accurate enough for stats.
+        (*out_stats).total_lines = engine.pieces.iter().map(|p| p.line_count()).sum();
+        (*out_stats).file_size_bytes = engine.mmap.len();
+        (*out_stats).indexing_time_ms = idx.indexing_time_ms as u64;
+    }
+    true
 }
 
 #[no_mangle]

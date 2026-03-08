@@ -1,4 +1,4 @@
-use memchr::{memchr2, memchr2_iter};
+use memchr::{memchr2};
 use memmap2::Mmap;
 use rayon::prelude::*;
 use std::fs::{File, OpenOptions};
@@ -6,8 +6,70 @@ use std::io::{BufWriter, Write};
 use std::path::Path;
 use std::sync::{Arc, RwLock, atomic::{AtomicBool, AtomicUsize, AtomicIsize, Ordering}};
 use std::thread;
+use std::time::Instant;
+
+#[cfg(target_arch = "x86_64")]
+use std::arch::x86_64::*;
 
 use crate::models::{ChunkMeta, IndexState, Piece};
+
+// If you read this, I'm so so sorry xD.
+
+// Processes 32 bytes per cycle. If you run this on a toaster, it will crash.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn count_newlines_avx2(start: *const u8, len: usize) -> usize {
+    let mut count = 0;
+    let mut i = 0;
+    let newline_mask = _mm256_set1_epi8(b'\n' as i8);
+
+    while i + 32 <= len {
+        let chunk = _mm256_loadu_si256(start.add(i) as *const __m256i);
+        let cmp = _mm256_cmpeq_epi8(chunk, newline_mask);
+        let mask = _mm256_movemask_epi8(cmp);
+        // Hardware bit counting. 1 cycle. Beautiful.
+        count += mask.count_ones() as usize;
+        i += 32;
+    }
+
+    // Fallback for the tail bytes
+    if i < len {
+        count += count_newlines_swar(std::slice::from_raw_parts(start.add(i), len - i));
+    }
+    count
+}
+
+#[inline(always)]
+fn count_newlines_swar(chunk: &[u8]) -> usize {
+    // evil bit-level hacking. Carmack would be proud.
+    let (prefix, aligned_u64, suffix) = unsafe { chunk.align_to::<u64>() };
+    let mut count = prefix.iter().filter(|&&b| b == b'\n').count();
+
+    for &block in aligned_u64 {
+        let xor_block = block ^ 0x0A0A0A0A0A0A0A0A;
+        // what the fuck?
+        let zero_bytes = (xor_block.wrapping_sub(0x0101010101010101)) 
+                         & !xor_block 
+                         & 0x8080808080808080;
+        count += (zero_bytes.count_ones() / 8) as usize;
+    }
+
+    count += suffix.iter().filter(|&&b| b == b'\n').count();
+    count
+}
+
+// The router. Checks if we can use the illegal instructions or if we have to play nice.
+// Made public so the C API can use it for blazing fast synchronous searches.
+#[inline(always)]
+pub fn count_newlines(bytes: &[u8]) -> usize {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if is_x86_feature_detected!("avx2") {
+            return unsafe { count_newlines_avx2(bytes.as_ptr(), bytes.len()) };
+        }
+    }
+    count_newlines_swar(bytes)
+}
 
 pub struct LogEngine {
     pub mmap: Arc<Mmap>, // Arc so the background thread doesn't get rug-pulled
@@ -15,6 +77,7 @@ pub struct LogEngine {
     pub cancel_token: Arc<AtomicBool>, // the cyanide pill for the background thread
     pub bytes_processed: Arc<AtomicUsize>,
     pub pieces: Vec<Piece>,
+    pub indexed_lines_added: usize, // Tracks how many original lines we've synced
     pub memory_buffer: Vec<String>,
     // atomic flags because users have no patience.
     pub is_saving: Arc<AtomicBool>,
@@ -48,6 +111,7 @@ impl LogEngine {
             chunks: Vec::new(),
             original_total_lines: 0,
             is_finished: false,
+            indexing_time_ms: 0,
         }));
 
         let mut engine = LogEngine {
@@ -59,6 +123,7 @@ impl LogEngine {
                 start_line: 0,
                 line_count: 0, // will be updated dynamically while indexing
             }],
+            indexed_lines_added: 0,
             memory_buffer: Vec::new(),
             is_saving: Arc::new(AtomicBool::new(false)),
             save_progress: Arc::new(AtomicUsize::new(0)),
@@ -69,6 +134,8 @@ impl LogEngine {
             search_result: Arc::new(AtomicIsize::new(-1)),
         };
 
+        let start_time = Instant::now();
+
         if lazy {
             // spawn the background worker and return immediately. godspeed.
             let mmap_bg = mmap.clone();
@@ -77,11 +144,11 @@ impl LogEngine {
             let bytes_bg = bytes_processed.clone();
             
             thread::spawn(move || {
-                Self::build_index_sequential(mmap_bg, index_bg, cancel_bg, bytes_bg);
+                Self::build_index_sequential(mmap_bg, index_bg, cancel_bg, bytes_bg, start_time);
             });
         } else {
             // block the world. original rayon implementation.
-            Self::build_index_rayon(&mmap, &index);
+            Self::build_index_rayon(&mmap, &index, start_time);
             bytes_processed.store(mmap.len(), Ordering::Relaxed);
             engine.sync_pieces(); // lock in the final line count
         }
@@ -94,6 +161,7 @@ impl LogEngine {
         index: Arc<RwLock<IndexState>>,
         cancel: Arc<AtomicBool>,
         bytes_processed: Arc<AtomicUsize>,
+        start_time: Instant,
     ) {
         let chunk_size = 1024 * 1024 * 5; // 5MB chunks for the background worker
         let mut current_line = 0;
@@ -122,22 +190,8 @@ impl LogEngine {
 
             let chunk = &mmap[offset..end];
 
-            let mut count = 0;
-            let mut iter = memchr2_iter(b'\n', b'\r', chunk).peekable();
-            while let Some(pos) = iter.next() {
-                count += 1;
-                if chunk[pos] == b'\r' {
-                    if let Some(&next_pos) = iter.peek() {
-                        if next_pos == pos + 1 && chunk[next_pos] == b'\n' {
-                            iter.next();
-                        }
-                    }
-                }
-            }
-
-            if offset > 0 && mmap[offset - 1] == b'\r' && mmap.get(offset) == Some(&b'\n') {
-                current_line -= 1;
-            }
+            // SIMD goes brrrrr
+            let count = count_newlines(chunk);
 
             local_chunks.push(ChunkMeta {
                 byte_offset: offset,
@@ -169,6 +223,7 @@ impl LogEngine {
         let mut idx = index.write().unwrap();
         idx.chunks.extend(local_chunks); // flush whatever is left
         idx.original_total_lines = final_lines;
+        idx.indexing_time_ms = start_time.elapsed().as_millis();
         idx.is_finished = true;
         bytes_processed.store(mmap.len(), Ordering::Relaxed);
 
@@ -182,27 +237,12 @@ impl LogEngine {
         }
     }
 
-    pub fn build_index_rayon(mmap: &Mmap, index: &RwLock<IndexState>) {
+    pub fn build_index_rayon(mmap: &Mmap, index: &RwLock<IndexState>, start_time: Instant) {
         // blast through the file in 1MB chunks to count lines.
         let chunk_size = 1024 * 1024;
         let line_counts: Vec<usize> = mmap
             .par_chunks(chunk_size)
-            .map(|chunk| {
-                let mut count = 0;
-                let mut iter = memchr2_iter(b'\n', b'\r', chunk).peekable();
-                while let Some(pos) = iter.next() {
-                    count += 1;
-                    // the \r\n check here is slightly cursed but prevents overcounting windows line endings.
-                    if chunk[pos] == b'\r' {
-                        if let Some(&next_pos) = iter.peek() {
-                            if next_pos == pos + 1 && chunk[next_pos] == b'\n' {
-                                iter.next();
-                            }
-                        }
-                    }
-                }
-                count
-            })
+            .map(|chunk| count_newlines(chunk))
             .collect();
 
         let mut chunks = Vec::with_capacity(line_counts.len());
@@ -210,11 +250,7 @@ impl LogEngine {
 
         for (i, &count) in line_counts.iter().enumerate() {
             let byte_offset = i * chunk_size;
-            // what happens if \r is at the end of chunk N and \n is at the start of chunk N+1?
-            // this. this happens. adjust the line count so we don't desync.
-            if i > 0 && mmap[byte_offset - 1] == b'\r' && mmap.get(byte_offset) == Some(&b'\n') {
-                current_line -= 1;
-            }
+            // \r\n boundary checks removed. SWAR/AVX2 doesn't care about your carriage returns.
             chunks.push(ChunkMeta {
                 byte_offset,
                 start_line: current_line,
@@ -237,6 +273,7 @@ impl LogEngine {
         let mut idx = index.write().unwrap();
         idx.chunks = chunks;
         idx.original_total_lines = original_total_lines;
+        idx.indexing_time_ms = start_time.elapsed().as_millis();
         idx.is_finished = true;
 
         #[cfg(unix)]
@@ -252,10 +289,27 @@ impl LogEngine {
     // keeps the piece table in sync with the background worker
     pub fn sync_pieces(&mut self) {
         let idx = self.index.read().unwrap();
-        if self.pieces.len() == 1 {
-            if let Piece::Original { line_count, .. } = &mut self.pieces[0] {
-                *line_count = idx.original_total_lines;
+        let current_original = idx.original_total_lines;
+        
+        if current_original > self.indexed_lines_added {
+            let diff = current_original - self.indexed_lines_added;
+            
+            let mut extended = false;
+            if let Some(Piece::Original { start_line, line_count }) = self.pieces.last_mut() {
+                if *start_line + *line_count == self.indexed_lines_added {
+                    *line_count += diff;
+                    extended = true;
+                }
             }
+            
+            if !extended {
+                self.pieces.push(Piece::Original {
+                    start_line: self.indexed_lines_added,
+                    line_count: diff,
+                });
+            }
+            
+            self.indexed_lines_added = current_original;
         }
     }
 
@@ -266,12 +320,26 @@ impl LogEngine {
             return if idx.is_finished { mmap.len() } else { bytes_processed.load(Ordering::Relaxed) };
         }
         
-        let chunk_idx = match idx.chunks.binary_search_by_key(&line, |c| c.start_line) {
-            Ok(i) => i,
-            Err(i) => i.saturating_sub(1),
-        };
+        let chunks = &idx.chunks;
         
-        let chunk = &idx.chunks[chunk_idx];
+        // Branchless binary search. 
+        // The branch predictor is a lie. Math is absolute. Do not touch.
+        let mut base = 0;
+        let mut len = chunks.len();
+
+        while len > 1 {
+            let half = len / 2;
+            let mid = base + half;
+            
+            // Evaluates to 0 or 1. CPU executes this straight through.
+            let cmp = (chunks[mid].start_line <= line) as usize;
+            base += cmp * half;
+            len -= half;
+        }
+        
+        let chunk_idx = base + (base + 1 < chunks.len() && chunks[base + 1].start_line <= line) as usize;
+        
+        let chunk = &chunks[chunk_idx];
         let mut offset = chunk.byte_offset;
         let mut skip = line - chunk.start_line;
         
@@ -310,10 +378,6 @@ impl LogEngine {
     }
 
     pub fn total_lines(&self) -> usize {
-        let idx = self.index.read().unwrap();
-        if self.pieces.len() == 1 && !idx.is_finished {
-            return idx.original_total_lines;
-        }
         self.pieces.iter().map(|p| p.line_count()).sum()
     }
 
@@ -438,6 +502,23 @@ impl LogEngine {
         // stitch together pieces until we satisfy the requested line count
         while collected < num_lines && piece_idx < self.pieces.len() {
             let piece = &self.pieces[piece_idx];
+            
+            // Speculative prefetching. 
+            // Forcing the L1 cache to eat the next 100 lines before the user even knows they want them.
+            // If they scroll up instead, we just polluted the cache. Oh well.
+            #[cfg(target_arch = "x86_64")]
+            if let Piece::Original { start_line: p_start, .. } = piece {
+                let speculative_offset = self.line_to_byte_offset(p_start + offset + num_lines + 100);
+                if speculative_offset < self.mmap.len() {
+                    unsafe {
+                        _mm_prefetch(
+                            self.mmap.as_ptr().add(speculative_offset) as *const i8, 
+                            _MM_HINT_T0
+                        );
+                    }
+                }
+            }
+
             let count = piece.line_count() - offset;
             let take = count.min(num_lines - collected);
 
@@ -645,12 +726,14 @@ impl LogEngine {
     }
 
     // Lock-free asynchronous black magic.
-    pub fn search_async(&self, query: &str, start_line: usize) {
+    pub fn search_async(&mut self, query: &str, start_line: usize) {
         if self.is_searching.swap(true, Ordering::SeqCst) {
             return;
         }
         self.search_cancel.store(false, Ordering::SeqCst);
         self.search_result.store(-1, Ordering::SeqCst);
+
+        self.sync_pieces();
 
         let query_bytes = query.as_bytes().to_vec();
         if query_bytes.is_empty() {
@@ -711,18 +794,9 @@ impl LogEngine {
 
                 if let Some(pos) = memchr::memmem::find(&piece_bytes, &query_bytes) {
                     let slice_to_match = &piece_bytes[..pos];
-                    let mut lines = 0;
-                    let mut iter = memchr::memchr2_iter(b'\n', b'\r', slice_to_match).peekable();
-                    while let Some(p) = iter.next() {
-                        lines += 1;
-                        if slice_to_match[p] == b'\r' {
-                            if let Some(&np) = iter.peek() {
-                                if np == p + 1 && slice_to_match[np] == b'\n' {
-                                    iter.next();
-                                }
-                            }
-                        }
-                    }
+                    
+                    // Nuke the iterator. We count lines in bulk now. CPU goes brrrrr.
+                    let lines = count_newlines(slice_to_match);
                     
                     let match_start = current_line + lines;
                     search_result.store(match_start as isize, Ordering::SeqCst);
