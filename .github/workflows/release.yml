@@ -12,7 +12,7 @@ jobs:
     strategy:
       matrix:
         include:
-          - os: ubuntu-latest
+          - os: ubuntu-20.04
             cargo_out: target/release/libjuanlog.so
             release_name: libjuanlog-linux.so
           - os: macos-latest
