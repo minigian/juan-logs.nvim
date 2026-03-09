@@ -108,13 +108,6 @@ Consider this a proof of concept. This software does NOT perform magic; opening 
 
 Feel free to report any issue. PRs are welcome.
 
-I'm tired...
+<img width="1911" height="1004" alt="image" src="https://github.com/user-attachments/assets/082162a4-168d-44b7-8102-a3454775a947" />
 
-
-
-
-
-
-
-
-
+Good enough. 111GBs in 200 seconds, Pretty fast and I can't go any further.
