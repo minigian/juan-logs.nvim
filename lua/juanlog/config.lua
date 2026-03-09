@@ -1,5 +1,5 @@
 local M = {
-    threshold_size = 1024 * 1024 * 10, -- 100MB trigger
+    threshold_size = 1024 * 1024 * 100, -- 100MB trigger
     mode = "dynamic",
     lazy = true, -- false = block until indexed, true = on-demand loading
     dynamic_chunk_size = 10000,
