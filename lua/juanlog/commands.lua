@@ -69,7 +69,7 @@ function M.setup_commands(bufnr)
 
                 if q_b then
                     base_query = q_b
-                    local chunk_size = config.dynamic_chunk_size
+                    local chunk_size = state.chunk_size or config.dynamic_chunk_size
                     limit_start = math.max(0, state.offset - (tonumber(up_b) * chunk_size))
                     limit_end = math.min(state.total, state.offset + chunk_size + (tonumber(down_b) * chunk_size) - 1)
                 end

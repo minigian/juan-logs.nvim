@@ -125,17 +125,17 @@ function M.jump_to_line(bufnr, state, found_line)
         return
     end
 
-    local half_chunk = math.floor(config.dynamic_chunk_size / 2)
+    local half_chunk = math.floor(state.chunk_size / 2)
     local new_offset = math.max(0, found_line - half_chunk)
 
     -- state.total is a lie if we are still indexing. trust rust to clamp it.
-    if state.indexing_progress >= 1.0 and new_offset + config.dynamic_chunk_size > state.total then
-        new_offset = math.max(0, state.total - config.dynamic_chunk_size)
+    if state.indexing_progress >= 1.0 and new_offset + state.chunk_size > state.total then
+        new_offset = math.max(0, state.total - state.chunk_size)
     end
 
     state.updating = true
     local was_modified = vim.api.nvim_buf_get_option(bufnr, 'modified')
-    local new_lines = M.fetch_lines(state.engine, new_offset, config.dynamic_chunk_size)
+    local new_lines = M.fetch_lines(state.engine, new_offset, state.chunk_size)
     
     -- replace the entire buffer content safely
     M.force_set_lines(bufnr, 0, -1, false, new_lines)
@@ -160,7 +160,7 @@ function M.jump_to_eof(bufnr, state)
     if state.indexing_progress < 1.0 then
         -- the abyss stares back. we don't know the line numbers yet.
         state.is_eof_mode = true
-        local new_lines = M.fetch_eof_lines(state.engine, config.dynamic_chunk_size)
+        local new_lines = M.fetch_eof_lines(state.engine, state.chunk_size)
         M.force_set_lines(bufnr, 0, -1, false, new_lines)
         M.safe_set_cursor(0, {#new_lines, 0})
     else

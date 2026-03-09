@@ -71,6 +71,156 @@ pub fn count_newlines(bytes: &[u8]) -> usize {
     count_newlines_swar(bytes)
 }
 
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn detect_monster_line_avx2(chunk: &[u8]) -> bool {
+    let mut i = 0;
+    let newline_mask = _mm256_set1_epi8(b'\n' as i8);
+    let mut consecutive_no_newline = 0;
+
+    while i + 32 <= chunk.len() {
+        let data = _mm256_loadu_si256(chunk.as_ptr().add(i) as *const __m256i);
+        let cmp = _mm256_cmpeq_epi8(data, newline_mask);
+        let mask = _mm256_movemask_epi8(cmp);
+        
+        if mask == 0 {
+            consecutive_no_newline += 32;
+            if consecutive_no_newline >= 10000 {
+                return true;
+            }
+        } else {
+            consecutive_no_newline = 0;
+        }
+        i += 32;
+    }
+    false
+}
+
+#[inline(always)]
+fn detect_monster_line_swar(chunk: &[u8]) -> bool {
+    let (prefix, aligned_u64, suffix) = unsafe { chunk.align_to::<u64>() };
+    let mut consecutive_no_newline = 0;
+
+    for &b in prefix {
+        if b == b'\n' { consecutive_no_newline = 0; } else { consecutive_no_newline += 1; }
+    }
+
+    for &block in aligned_u64 {
+        let xor_block = block ^ 0x0A0A0A0A0A0A0A0A;
+        let zero_bytes = (xor_block.wrapping_sub(0x0101010101010101)) 
+                         & !xor_block 
+                         & 0x8080808080808080;
+        if zero_bytes == 0 {
+            consecutive_no_newline += 8;
+            if consecutive_no_newline >= 10000 {
+                return true;
+            }
+        } else {
+            consecutive_no_newline = 0;
+        }
+    }
+
+    for &b in suffix {
+        if b == b'\n' { consecutive_no_newline = 0; } else { consecutive_no_newline += 1; }
+        if consecutive_no_newline >= 10000 {
+            return true;
+        }
+    }
+    false
+}
+
+#[inline(always)]
+pub fn is_monster_line(chunk: &[u8]) -> bool {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if is_x86_feature_detected!("avx2") {
+            return unsafe { detect_monster_line_avx2(chunk) };
+        }
+    }
+    detect_monster_line_swar(chunk)
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn find_safe_cut_avx2(mmap: &[u8], base: usize) -> usize {
+    let mut offset = base;
+    let limit = base.saturating_sub(128);
+    
+    let comma = _mm256_set1_epi8(b',' as i8);
+    let space = _mm256_set1_epi8(b' ' as i8);
+    let brace = _mm256_set1_epi8(b'}' as i8);
+    let bracket = _mm256_set1_epi8(b']' as i8);
+
+    while offset >= 32 && offset > limit {
+        offset -= 32;
+        let chunk = _mm256_loadu_si256(mmap.as_ptr().add(offset) as *const __m256i);
+        
+        let eq_comma = _mm256_cmpeq_epi8(chunk, comma);
+        let eq_space = _mm256_cmpeq_epi8(chunk, space);
+        let eq_brace = _mm256_cmpeq_epi8(chunk, brace);
+        let eq_bracket = _mm256_cmpeq_epi8(chunk, bracket);
+        
+        let m1 = _mm256_or_si256(eq_comma, eq_space);
+        let m2 = _mm256_or_si256(eq_brace, eq_bracket);
+        let m_all = _mm256_or_si256(m1, m2);
+        
+        let mask = _mm256_movemask_epi8(m_all) as u32;
+        if mask != 0 {
+            let idx = 31 - mask.leading_zeros();
+            return offset + idx as usize + 1;
+        }
+    }
+    
+    find_safe_cut_swar(mmap, base)
+}
+
+#[inline(always)]
+fn find_safe_cut_swar(mmap: &[u8], base: usize) -> usize {
+    let limit = base.saturating_sub(128);
+    let mut i = base;
+    // wanna see a magic trick??
+    while i >= 8 && i > limit {
+        i -= 8;
+        let chunk = unsafe { std::ptr::read_unaligned(mmap.as_ptr().add(i) as *const u64) };
+        
+        let xor_comma = chunk ^ 0x2C2C2C2C2C2C2C2C;
+        let xor_space = chunk ^ 0x2020202020202020;
+        let xor_brace = chunk ^ 0x7D7D7D7D7D7D7D7D;
+        let xor_bracket = chunk ^ 0x5D5D5D5D5D5D5D5D;
+        
+        let z_comma = (xor_comma.wrapping_sub(0x0101010101010101)) & !xor_comma & 0x8080808080808080;
+        let z_space = (xor_space.wrapping_sub(0x0101010101010101)) & !xor_space & 0x8080808080808080;
+        let z_brace = (xor_brace.wrapping_sub(0x0101010101010101)) & !xor_brace & 0x8080808080808080;
+        let z_bracket = (xor_bracket.wrapping_sub(0x0101010101010101)) & !xor_bracket & 0x8080808080808080;
+        
+        let mask = z_comma | z_space | z_brace | z_bracket;
+        if mask != 0 {
+            let idx = 63 - mask.leading_zeros();
+            return i + (idx as usize / 8) + 1;
+        }
+    }
+    
+    while i > limit && i > 0 {
+        i -= 1;
+        let b = mmap[i];
+        if b == b',' || b == b' ' || b == b'}' || b == b']' {
+            return i + 1;
+        }
+    }
+    base
+}
+
+#[inline(always)]
+pub fn find_safe_cut(mmap: &[u8], base: usize) -> usize {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if is_x86_feature_detected!("avx2") {
+            return unsafe { find_safe_cut_avx2(mmap, base) };
+        }
+    }
+    find_safe_cut_swar(mmap, base)
+}
+
 pub struct LogEngine {
     pub mmap: Arc<Mmap>, // Arc so the background thread doesn't get rug-pulled
     pub index: Arc<RwLock<IndexState>>,
@@ -87,6 +237,8 @@ pub struct LogEngine {
     pub is_searching: Arc<AtomicBool>,
     pub search_cancel: Arc<AtomicBool>,
     pub search_result: Arc<AtomicIsize>,
+    pub is_fixed_width: bool,
+    pub fixed_width_size: usize,
 }
 
 impl LogEngine {
@@ -114,6 +266,10 @@ impl LogEngine {
             indexing_time_ms: 0,
         }));
 
+        let sample_size = mmap.len().min(64 * 1024);
+        let is_fixed_width = is_monster_line(&mmap[..sample_size]);
+        let fixed_width_size = 4096;
+
         let mut engine = LogEngine {
             mmap: mmap.clone(),
             index: index.clone(),
@@ -132,11 +288,26 @@ impl LogEngine {
             is_searching: Arc::new(AtomicBool::new(false)),
             search_cancel: Arc::new(AtomicBool::new(false)),
             search_result: Arc::new(AtomicIsize::new(-1)),
+            is_fixed_width,
+            fixed_width_size,
         };
 
         let start_time = Instant::now();
 
-        if lazy {
+        if is_fixed_width {
+            let total_lines = (mmap.len() + fixed_width_size - 1) / fixed_width_size;
+            engine.pieces[0] = Piece::Original {
+                start_line: 0,
+                line_count: total_lines,
+            };
+            engine.indexed_lines_added = total_lines;
+            
+            let mut idx = index.write().unwrap();
+            idx.original_total_lines = total_lines;
+            idx.indexing_time_ms = start_time.elapsed().as_millis();
+            idx.is_finished = true;
+            bytes_processed.store(mmap.len(), Ordering::Relaxed);
+        } else if lazy {
             // spawn the background worker and return immediately. godspeed.
             let mmap_bg = mmap.clone();
             let index_bg = index.clone();
@@ -314,7 +485,13 @@ impl LogEngine {
     }
 
     // detached offset calculator. borrow checker appeasement.
-    pub fn calc_offset(index: &RwLock<IndexState>, bytes_processed: &AtomicUsize, mmap: &Mmap, line: usize) -> usize {
+    pub fn calc_offset(index: &RwLock<IndexState>, bytes_processed: &AtomicUsize, mmap: &Mmap, line: usize, is_fixed_width: bool, fixed_width_size: usize) -> usize {
+        if is_fixed_width {
+            let base = (line * fixed_width_size).min(mmap.len());
+            if base == 0 || base == mmap.len() { return base; }
+            return find_safe_cut(mmap, base);
+        }
+
         let idx = index.read().unwrap();
         if line >= idx.original_total_lines {
             return if idx.is_finished { mmap.len() } else { bytes_processed.load(Ordering::Relaxed) };
@@ -360,7 +537,7 @@ impl LogEngine {
     }
 
     pub fn line_to_byte_offset(&self, line: usize) -> usize {
-        Self::calc_offset(&self.index, &self.bytes_processed, &self.mmap, line)
+        Self::calc_offset(&self.index, &self.bytes_processed, &self.mmap, line, self.is_fixed_width, self.fixed_width_size)
     }
 
     pub fn get_original_bytes(&self, start_line: usize, line_count: usize) -> &[u8] {
@@ -527,13 +704,28 @@ impl LogEngine {
                     let start_byte = self.line_to_byte_offset(p_start + offset);
                     let end_byte = self.line_to_byte_offset(p_start + offset + take);
                     
-                    let bytes = &self.mmap[start_byte..end_byte];
-                    
-                    // logs are dirty. replace garbage bytes with  instead of failing silently.
-                    let s = String::from_utf8_lossy(bytes);
-                    block.push_str(&s);
-                    if !block.ends_with('\n') && !block.is_empty() {
-                        block.push('\n');
+                    if self.is_fixed_width {
+                        let mut current = start_byte;
+                        for i in 0..take {
+                            let logical_line = p_start + offset + i + 1;
+                            let next = self.line_to_byte_offset(logical_line);
+                            if current < next {
+                                let bytes = &self.mmap[current..next];
+                                let s = String::from_utf8_lossy(bytes);
+                                block.push_str(&s);
+                            }
+                            block.push('\n');
+                            current = next;
+                        }
+                    } else {
+                        let bytes = &self.mmap[start_byte..end_byte];
+                        
+                        // logs are dirty. replace garbage bytes with  instead of failing silently.
+                        let s = String::from_utf8_lossy(bytes);
+                        block.push_str(&s);
+                        if !block.ends_with('\n') && !block.is_empty() {
+                            block.push('\n');
+                        }
                     }
                 }
                 Piece::Memory { start_idx, .. } => {
@@ -556,6 +748,25 @@ impl LogEngine {
     pub fn get_eof_block(&mut self, num_lines: usize) -> String {
         let mut block = String::new();
         if self.mmap.is_empty() || num_lines == 0 {
+            return block;
+        }
+
+        if self.is_fixed_width {
+            let start_line = self.total_lines().saturating_sub(num_lines);
+            let start_byte = self.line_to_byte_offset(start_line);
+            
+            let mut current = start_byte;
+            for i in 0..num_lines {
+                let logical_line = start_line + i + 1;
+                let next = self.line_to_byte_offset(logical_line);
+                if current < next {
+                    let bytes = &self.mmap[current..next];
+                    let s = String::from_utf8_lossy(bytes);
+                    block.push_str(&s);
+                }
+                block.push('\n');
+                current = next;
+            }
             return block;
         }
 
@@ -594,13 +805,25 @@ impl LogEngine {
         for piece in &self.pieces {
             match piece {
                 Piece::Original { start_line, line_count } => {
-                    let bytes = self.get_original_bytes(*start_line, *line_count);
-                    if writer.write_all(bytes).is_err() {
-                        return false;
-                    }
-                    if !bytes.ends_with(b"\n") && !bytes.is_empty() {
-                        if writer.write_all(b"\n").is_err() {
+                    if self.is_fixed_width {
+                        for i in 0..*line_count {
+                            let l_start = self.line_to_byte_offset(start_line + i);
+                            let l_end = self.line_to_byte_offset(start_line + i + 1);
+                            if l_start < l_end {
+                                if writer.write_all(&self.mmap[l_start..l_end]).is_err() {
+                                    return false;
+                                }
+                            }
+                        }
+                    } else {
+                        let bytes = self.get_original_bytes(*start_line, *line_count);
+                        if writer.write_all(bytes).is_err() {
                             return false;
+                        }
+                        if !bytes.ends_with(b"\n") && !bytes.is_empty() {
+                            if writer.write_all(b"\n").is_err() {
+                                return false;
+                            }
                         }
                     }
                 }
@@ -609,8 +832,10 @@ impl LogEngine {
                         if writer.write_all(self.memory_buffer[start_idx + i].as_bytes()).is_err() {
                             return false;
                         }
-                        if writer.write_all(b"\n").is_err() {
-                            return false;
+                        if !self.is_fixed_width {
+                            if writer.write_all(b"\n").is_err() {
+                                return false;
+                            }
                         }
                     }
                 }
@@ -640,18 +865,23 @@ impl LogEngine {
         let is_saving = self.is_saving.clone();
         let save_progress = self.save_progress.clone();
         let save_total = self.save_total.clone();
+        let is_fixed_width = self.is_fixed_width;
+        let fixed_width_size = self.fixed_width_size;
 
         let mut total_bytes = 0;
         for p in &pieces {
             match p {
                 Piece::Original { start_line, line_count } => {
-                    let start = Self::calc_offset(&index, &bytes_processed, &mmap, *start_line);
-                    let end = Self::calc_offset(&index, &bytes_processed, &mmap, start_line + line_count);
+                    let start = Self::calc_offset(&index, &bytes_processed, &mmap, *start_line, is_fixed_width, fixed_width_size);
+                    let end = Self::calc_offset(&index, &bytes_processed, &mmap, start_line + line_count, is_fixed_width, fixed_width_size);
                     total_bytes += end.saturating_sub(start);
                 }
                 Piece::Memory { start_idx, line_count } => {
                     for i in 0..*line_count {
-                        total_bytes += memory_buffer[*start_idx + i].len() + 1;
+                        total_bytes += memory_buffer[*start_idx + i].len();
+                        if !is_fixed_width {
+                            total_bytes += 1;
+                        }
                     }
                 }
             }
@@ -674,42 +904,67 @@ impl LogEngine {
             for piece in &pieces {
                 match piece {
                     Piece::Original { start_line, line_count } => {
-                        let start = Self::calc_offset(&index, &bytes_processed, &mmap, *start_line);
-                        let end = Self::calc_offset(&index, &bytes_processed, &mmap, start_line + line_count);
-                        let end = end.min(mmap.len());
-                        
-                        if start < end {
-                            let mut current_offset = start;
-                            // chunking this so the UI doesn't look dead. 2MB at a time.
-                            let chunk_size = 1024 * 1024 * 2; 
+                        if is_fixed_width {
+                            for i in 0..*line_count {
+                                let logical_line = start_line + i;
+                                let l_start = Self::calc_offset(&index, &bytes_processed, &mmap, logical_line, is_fixed_width, fixed_width_size);
+                                let l_end = Self::calc_offset(&index, &bytes_processed, &mmap, logical_line + 1, is_fixed_width, fixed_width_size);
+                                if l_start < l_end {
+                                    let chunk = &mmap[l_start..l_end];
+                                    if writer.write_all(chunk).is_err() {
+                                        let _ = std::fs::remove_file(&temp_path);
+                                        break;
+                                    }
+                                    current_progress += chunk.len();
+                                }
+                                save_progress.store(current_progress, Ordering::Relaxed);
+                            }
+                        } else {
+                            let start = Self::calc_offset(&index, &bytes_processed, &mmap, *start_line, is_fixed_width, fixed_width_size);
+                            let end = Self::calc_offset(&index, &bytes_processed, &mmap, start_line + line_count, is_fixed_width, fixed_width_size);
+                            let end = end.min(mmap.len());
                             
-                            while current_offset < end {
-                                let next_offset = (current_offset + chunk_size).min(end);
-                                let chunk = &mmap[current_offset..next_offset];
+                            if start < end {
+                                let mut current_offset = start;
+                                // chunking this so the UI doesn't look dead. 2MB at a time.
+                                let chunk_size = 1024 * 1024 * 2; 
                                 
-                                if writer.write_all(chunk).is_err() {
-                                    let _ = std::fs::remove_file(&temp_path);
-                                    break; // disk is probably full. rip.
+                                while current_offset < end {
+                                    let next_offset = (current_offset + chunk_size).min(end);
+                                    let chunk = &mmap[current_offset..next_offset];
+                                    
+                                    if writer.write_all(chunk).is_err() {
+                                        let _ = std::fs::remove_file(&temp_path);
+                                        break; // disk is probably full. rip.
+                                    }
+                                    
+                                    current_progress += chunk.len();
+                                    save_progress.store(current_progress, Ordering::Relaxed);
+                                    current_offset = next_offset;
                                 }
                                 
-                                current_progress += chunk.len();
-                                save_progress.store(current_progress, Ordering::Relaxed);
-                                current_offset = next_offset;
-                            }
-                            
-                            if mmap[end - 1] != b'\n' {
-                                let _ = writer.write_all(b"\n");
+                                if mmap[end - 1] != b'\n' {
+                                    let _ = writer.write_all(b"\n");
+                                }
                             }
                         }
                     }
                     Piece::Memory { start_idx, line_count } => {
                         for i in 0..*line_count {
                             let line_bytes = memory_buffer[*start_idx + i].as_bytes();
-                            if writer.write_all(line_bytes).is_err() || writer.write_all(b"\n").is_err() {
+                            if writer.write_all(line_bytes).is_err() {
                                 let _ = std::fs::remove_file(&temp_path);
                                 break;
                             }
-                            current_progress += line_bytes.len() + 1;
+                            current_progress += line_bytes.len();
+                            
+                            if !is_fixed_width {
+                                if writer.write_all(b"\n").is_err() {
+                                    let _ = std::fs::remove_file(&temp_path);
+                                    break;
+                                }
+                                current_progress += 1;
+                            }
                             save_progress.store(current_progress, Ordering::Relaxed);
                         }
                     }
@@ -749,6 +1004,8 @@ impl LogEngine {
         let is_searching = self.is_searching.clone();
         let search_cancel = self.search_cancel.clone();
         let search_result = self.search_result.clone();
+        let is_fixed_width = self.is_fixed_width;
+        let fixed_width_size = self.fixed_width_size;
 
         let mut current_logical = 0;
         let mut start_piece_idx = pieces.len();
@@ -777,8 +1034,8 @@ impl LogEngine {
                 let mut piece_bytes: Vec<u8> = Vec::new();
                 match piece {
                     Piece::Original { start_line: p_start, line_count } => {
-                        let start_byte = LogEngine::calc_offset(&index, &bytes_processed, &mmap, p_start + offset);
-                        let end_byte = LogEngine::calc_offset(&index, &bytes_processed, &mmap, p_start + line_count);
+                        let start_byte = LogEngine::calc_offset(&index, &bytes_processed, &mmap, p_start + offset, is_fixed_width, fixed_width_size);
+                        let end_byte = LogEngine::calc_offset(&index, &bytes_processed, &mmap, p_start + line_count, is_fixed_width, fixed_width_size);
                         let end_byte = end_byte.min(mmap.len());
                         if start_byte < end_byte {
                             piece_bytes.extend_from_slice(&mmap[start_byte..end_byte]);
@@ -796,7 +1053,11 @@ impl LogEngine {
                     let slice_to_match = &piece_bytes[..pos];
                     
                     // Nuke the iterator. We count lines in bulk now. CPU goes brrrrr.
-                    let lines = count_newlines(slice_to_match);
+                    let lines = if is_fixed_width {
+                        pos / fixed_width_size
+                    } else {
+                        count_newlines(slice_to_match)
+                    };
                     
                     let match_start = current_line + lines;
                     search_result.store(match_start as isize, Ordering::SeqCst);

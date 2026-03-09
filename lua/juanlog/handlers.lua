@@ -92,19 +92,19 @@ local function attach_buffer_events(bufnr, state, filepath)
                 local new_offset = state.offset
 
                 -- hit bottom margin?
-                if row > (buf_lines - config.dynamic_margin) and (state.offset + buf_lines < state.total) then
-                    local shift_amount = math.floor(config.dynamic_chunk_size / 2)
+                if row > (buf_lines - state.margin) and (state.offset + buf_lines < state.total) then
+                    local shift_amount = math.floor(state.chunk_size / 2)
                     new_offset = state.offset + shift_amount
                     
-                    if new_offset + config.dynamic_chunk_size > state.total then
-                        new_offset = state.total - config.dynamic_chunk_size
+                    if new_offset + state.chunk_size > state.total then
+                        new_offset = state.total - state.chunk_size
                     end
                     shift_needed = true
                 end
 
                 -- hit top margin?
-                if row < config.dynamic_margin and state.offset > 0 then
-                    local shift_amount = math.floor(config.dynamic_chunk_size / 2)
+                if row < state.margin and state.offset > 0 then
+                    local shift_amount = math.floor(state.chunk_size / 2)
                     new_offset = math.max(0, state.offset - shift_amount)
                     shift_needed = true
                 end
@@ -113,7 +113,7 @@ local function attach_buffer_events(bufnr, state, filepath)
                     state.updating = true
                     local was_modified = vim.api.nvim_buf_get_option(bufnr, 'modified')
                     
-                    local new_lines = core.fetch_lines(state.engine, new_offset, config.dynamic_chunk_size)
+                    local new_lines = core.fetch_lines(state.engine, new_offset, state.chunk_size)
                     
                     -- swap buffer content seamlessly
                     core.force_set_lines(bufnr, 0, -1, false, new_lines)
@@ -138,7 +138,7 @@ local function finish_indexing(bufnr, state, filepath, is_complete)
     state.total = tonumber(lib.log_engine_total_lines(state.engine))
     
     state.updating = true
-    local initial_lines = core.fetch_lines(state.engine, 0, config.dynamic_chunk_size)
+    local initial_lines = core.fetch_lines(state.engine, 0, state.chunk_size)
     core.force_set_lines(bufnr, 0, -1, false, initial_lines)
     vim.api.nvim_buf_set_option(bufnr, 'modified', false)
     state.updating = false
@@ -159,6 +159,8 @@ end
 
 local function setup_dynamic_window(bufnr, engine, total_lines, filepath)
     local lib = ffi_mod.get_lib()
+    local is_fixed = lib.log_engine_is_fixed_width(engine)
+    
     local state = {
         offset = 0,
         total = total_lines,
@@ -172,7 +174,9 @@ local function setup_dynamic_window(bufnr, engine, total_lines, filepath)
         poll_timer = nil,
         save_progress = -1.0,
         save_timer = nil,
-        save_tick = 0
+        save_tick = 0,
+        chunk_size = is_fixed and 1000 or config.dynamic_chunk_size,
+        margin = is_fixed and 200 or config.dynamic_margin
     }
     _G.JuanLogStates[bufnr] = state
 
@@ -183,6 +187,14 @@ local function setup_dynamic_window(bufnr, engine, total_lines, filepath)
             vim.wo[winid].number = true
         end
         vim.wo[winid].statusline = "%f %h%m%r %= %{get(b:,'juanlog_status','')} %15(%l/%L%)"
+        
+        if is_fixed then
+            vim.wo[winid].wrap = true
+        end
+    end
+
+    if is_fixed then
+        vim.notify("[JuanLog] Monster line detected. Fixed-width mode enabled.", vim.log.levels.WARN)
     end
 
     local progress = lib.log_engine_get_progress(engine)

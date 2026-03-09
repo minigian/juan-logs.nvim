@@ -24,6 +24,7 @@ ffi.cdef [[
     ptrdiff_t log_engine_search_backward(LogEngine* engine, const char* query, size_t start_line, size_t end_line);
     bool log_engine_get_stats(const LogEngine* engine, LogStats* out_stats);
     void log_engine_free(LogEngine* engine);
+    bool log_engine_is_fixed_width(const LogEngine* engine);
 ]]
 
 local function get_lib_path()

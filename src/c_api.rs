@@ -242,7 +242,11 @@ pub extern "C" fn log_engine_search(
                 let bytes = engine.get_original_bytes(p_start + offset, lines_to_search);
                 if let Some(pos) = memmem::find(bytes, query_bytes) {
                     // AVX2 goes brrrrr on search now. No more slow iterators.
-                    let lines = crate::core::count_newlines(&bytes[..pos]);
+                    let lines = if engine.is_fixed_width {
+                        pos / engine.fixed_width_size
+                    } else {
+                        crate::core::count_newlines(&bytes[..pos])
+                    };
                     return (current_logical + lines) as isize;
                 }
             }
@@ -312,7 +316,11 @@ pub extern "C" fn log_engine_search_backward(
                 let bytes = engine.get_original_bytes(p_start + skip, lines_to_fetch);
                 if let Some(pos) = memmem::rfind(bytes, query_bytes) {
                     // AVX2 backwards. Still fast.
-                    let lines = crate::core::count_newlines(&bytes[..pos]);
+                    let lines = if engine.is_fixed_width {
+                        pos / engine.fixed_width_size
+                    } else {
+                        crate::core::count_newlines(&bytes[..pos])
+                    };
                     return (piece_start_logical + skip + lines) as isize;
                 }
             }
@@ -415,4 +423,13 @@ pub extern "C" fn log_engine_cancel_search(engine: *mut LogEngine) {
         &mut *engine
     };
     engine.search_cancel.store(true, Ordering::SeqCst);
+}
+
+#[no_mangle]
+pub extern "C" fn log_engine_is_fixed_width(engine: *const LogEngine) -> bool {
+    let engine = unsafe {
+        if engine.is_null() { return false; }
+        &*engine
+    };
+    engine.is_fixed_width
 }
