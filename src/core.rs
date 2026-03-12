@@ -51,7 +51,7 @@ fn count_newlines_swar(chunk: &[u8]) -> usize {
         let zero_bytes = (xor_block.wrapping_sub(0x0101010101010101)) 
                          & !xor_block 
                          & 0x8080808080808080;
-        count += (zero_bytes.count_ones() / 8) as usize;
+        count += zero_bytes.count_ones() as usize;
     }
 
     count += suffix.iter().filter(|&&b| b == b'\n').count();
