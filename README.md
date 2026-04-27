@@ -5,7 +5,7 @@
 A high-performance log viewer for Neovim, powered by Rust and Piece Tables.
 This plugin lets you open large text files (gigabytes) slightly faster than vanilla Neovim without crashing it. It allows you to use Neovim (including plugins) smoothly, with minimal RAM and CPU usage while opening large files.
 
-![Proof](https://github.com/user-attachments/assets/815e1772-1016-4223-ac04-c3cc0003b9b5)
+![Proof Gif](https://github.com/user-attachments/assets/815e1772-1016-4223-ac04-c3cc0003b9b5)
 
 ## Should you use it?
 If you regularly open logs, database dumps, or CSVs larger than 100MB and Neovim freezes, crashes, or eats all your RAM, yes. If you only deal with small files, standard Neovim is already perfectly fine.
@@ -24,7 +24,6 @@ A: We don't read the file. We `mmap` it and let the OS deal with the paging nigh
 **Q: How do you know where line 5,000,000 is without reading everything?**  
 A: We spawn a background worker that blasts through the file in 5MB chunks using custom AVX2/SWAR instructions to count newlines. It builds a sparse index of byte offsets. Until the index finishes, the bottom of the file is just the abyss.
 
-
 **Q: What if I get bored and close the buffer while it's still indexing?**  
 A: We flip an atomic `cancel_token`. The background thread sees the cyanide pill, stops parsing, and dies quietly so it doesn't keep eating your CPU in the background. 
 
@@ -42,6 +41,9 @@ A: Existing plugins just disable syntax highlighting and plugins to save CPU, bu
 
 **Q: What happens when I save a 50GB file? Will Neovim freeze?**  
 A: No. We hijack the native `:w` command and perform an async save in a background thread. You can keep reading the file while Rust writes the Piece Table changes to disk and performs an atomic swap. Dark magic.
+
+**Q: Why does the plugin have 'juan' in its name? Are you dumb?** <br>
+A: Because Juan the horse is a truly hilarious character. How did this specimen end up on those stairs? Was the building he's on constructed right where he stood, before it all began? Is he stupid? Why we are even alive? Could it be that all that awaits us is absolute nothingness? Is humankind inherently inclined towards "evil" and selfishness? Was Schopenhauer right all along? Because of these unanswered questions, I decided to name my plugin after this terrific horse. And, regarding the second question, yes I am.
 
 ## Requirements
 - Neovim >= 0.9.0
@@ -112,3 +114,14 @@ Feel free to report any issue. PRs are welcome.
 
 Good enough. 111GBs in 200 seconds, Pretty fast and I can't go any further.
 
+### System specifications:
+- **OS:** Arch Linux (Kernel 6.19.13-zen-1)
+- **Desktop Environment:** Sway (Wayland)
+- **CPU:** AMD Ryzen 5 3500U (4 Cores / 8 Threads)
+- **RAM:** 12 GiB DDR4 @ 2133 MT/s
+- **Graphics:**
+  - Integrated: AMD Radeon Vega 8
+  - Dedicated: AMD Radeon 540X
+- **Storage:**
+  - Primary (System): Hikvision HS-SSD-FUTURE Lite 1TB (NVMe PCIe 3.0 x2). <- I USED THIS ONE
+  - Secondary (Storage): Toshiba MQ04ABF100 1TB (SATA HDD)
