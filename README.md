@@ -105,7 +105,7 @@ When a file exceeds the `threshold_size`, it opens in dynamic mode. Since only a
 - `G` - Jump to the absolute end of the file (reads backwards from the abyss).
 
 ## Donate to Juan
-[![](https://img.shields.io/badge/Buy_Juan_some_Hay-FFA500?style=for-the-badge&logo=ko-fi&logoColor=white)]([https://www.unicef.org/donate](https://unicef.org.co/))
+[![](https://img.shields.io/badge/Buy_Juan_some_Hay-FFA500?style=for-the-badge&logo=ko-fi&logoColor=white)](https://unicef.org.co/?utm_source=unicef.org&utm_medium=redirect&utm_campaign=global/donate)
 > "Juan doesn't need money, he's a horse. But there are kids in dangerous areas who do. Clicking above will take you to UNICEF."
 
 ## Important
