@@ -53,7 +53,7 @@ A: Because Juan the horse is a truly hilarious character. How did this specimen 
 - Have a screen
 - Motherboard
 - Electricity (if you don't have, I'm sorry)
-#### Optinal:
+#### Optional:
 - Cargo/Rust (for compiling, but not required due to the pre-compiled binaries in the repo)
 
 ## Installation
