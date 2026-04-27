@@ -104,6 +104,10 @@ When a file exceeds the `threshold_size`, it opens in dynamic mode. Since only a
 - `gg` - Jump to the absolute start of the file.
 - `G` - Jump to the absolute end of the file (reads backwards from the abyss).
 
+## Donate to Juan
+[![](https://img.shields.io/badge/Buy_Juan_some_Hay-FFA500?style=for-the-badge&logo=ko-fi&logoColor=white)]([https://www.unicef.org/donate](https://unicef.org.co/))
+> "Juan doesn't need money, he's a horse. But there are kids in dangerous areas who do. Clicking above will take you to UNICEF."
+
 ## Important
 
 Consider this a proof of concept. This software does NOT perform magic; opening speed depends entirely on your hardware. Be careful what you do, friend.
