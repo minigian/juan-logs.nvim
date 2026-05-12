@@ -19,7 +19,7 @@ local function attach_buffer_events(bufnr, state, filepath)
             local new_lines = vim.api.nvim_buf_get_lines(bufnr, firstline, new_lastline, false)
             local new_text = table.concat(new_lines, "\n")
 
-            lib.log_engine_apply_edit(state.engine, start_line, num_deleted, new_text)
+            lib.log_engine_apply_edit(state.engine, start_line, num_deleted, new_text, #new_text)
             state.total = tonumber(lib.log_engine_total_lines(state.engine))
         end
     })

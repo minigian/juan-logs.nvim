@@ -89,7 +89,7 @@ function M.setup_commands(bufnr)
         
         local found_down = -1
         if start_down <= limit_end then
-            found_down = tonumber(lib.log_engine_search(state.engine, base_query, start_down, limit_end))
+            found_down = tonumber(lib.log_engine_search(state.engine, base_query, #base_query, start_down, limit_end))
         end
 
         local start_up = math.max(0, current_line_idx - 1)
@@ -97,7 +97,7 @@ function M.setup_commands(bufnr)
         
         local found_up = -1
         if start_up >= limit_start and current_line_idx > 0 then
-            found_up = tonumber(lib.log_engine_search_backward(state.engine, base_query, start_up, limit_start))
+            found_up = tonumber(lib.log_engine_search_backward(state.engine, base_query, #base_query, start_up, limit_start))
         end
 
         local target_line = -1
@@ -206,7 +206,7 @@ function M.setup_commands(bufnr)
         local limit_end = state.last_limit_end or state.total
 
         if start_line <= limit_end then
-            local found_line = tonumber(lib.log_engine_search(state.engine, state.last_query, start_line, limit_end))
+            local found_line = tonumber(lib.log_engine_search(state.engine, state.last_query, #state.last_query, start_line, limit_end))
             if found_line >= 0 then
                 core.jump_to_line(bufnr, state, found_line)
             else
@@ -230,7 +230,7 @@ function M.setup_commands(bufnr)
         local limit_start = state.last_limit_start or 0
 
         if start_line >= limit_start then
-            local found_line = tonumber(lib.log_engine_search_backward(state.engine, state.last_query, start_line, limit_start))
+            local found_line = tonumber(lib.log_engine_search_backward(state.engine, state.last_query, #state.last_query, start_line, limit_start))
             if found_line >= 0 then
                 core.jump_to_line(bufnr, state, found_line)
             else

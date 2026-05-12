@@ -1,17 +1,37 @@
+// Avoid making changes to this file if you don't know what you're doing. Be careful.
+// I added explanatory more comments to ensure clarity.
+
+// External dependency for fast memory searching.
 use memchr::{memchr2};
-use memmap2::Mmap;
+
+// Module declarations and trait exports for the file paging system.
+pub mod pager_trait;
+
+#[cfg(target_pointer_width = "64")]
+pub mod pager_64;
+#[cfg(target_pointer_width = "64")]
+pub use pager_64::Pager64 as Pager;
+
+#[cfg(target_pointer_width = "32")]
+pub mod pager_32;
+#[cfg(target_pointer_width = "32")]
+pub use pager_32::Pager32 as Pager;
+
+pub use pager_trait::LogPager;
+
+// Standard and external library imports for concurrency, file I/O, and atomic state management.
 use rayon::prelude::*;
-use std::fs::{File, OpenOptions};
+use std::fs::OpenOptions;
 use std::io::{BufWriter, Write};
 use std::path::Path;
-use std::sync::{Arc, RwLock, atomic::{AtomicBool, AtomicUsize, AtomicIsize, Ordering}};
+use std::sync::{Arc, RwLock, atomic::{AtomicBool, AtomicIsize, Ordering}};
+
+use crate::models::{ChunkMeta, IndexState, Piece, AtomicOffset};
 use std::thread;
 use std::time::Instant;
 
 #[cfg(target_arch = "x86_64")]
 use std::arch::x86_64::*;
-
-use crate::models::{ChunkMeta, IndexState, Piece};
 
 // If you read this, I'm so so sorry xD.
 
@@ -39,23 +59,44 @@ unsafe fn count_newlines_avx2(start: *const u8, len: usize) -> usize {
     count
 }
 
+// Fallback method for counting newlines using SWAR (SIMD Within A Register) for broad architecture support.
 #[inline(always)]
 fn count_newlines_swar(chunk: &[u8]) -> usize {
     // evil bit-level hacking. Carmack would be proud.
-    let (prefix, aligned_u64, suffix) = unsafe { chunk.align_to::<u64>() };
-    let mut count = prefix.iter().filter(|&&b| b == b'\n').count();
+    #[cfg(target_pointer_width = "64")]
+    {
+        let (prefix, aligned_words, suffix) = unsafe { chunk.align_to::<u64>() };
+        let mut count = prefix.iter().filter(|&&b| b == b'\n').count();
 
-    for &block in aligned_u64 {
-        let xor_block = block ^ 0x0A0A0A0A0A0A0A0A;
+        for &block in aligned_words {
+            let xor_block = block ^ 0x0A0A0A0A0A0A0A0A;
         // what the fuck?
-        let zero_bytes = (xor_block.wrapping_sub(0x0101010101010101)) 
-                         & !xor_block 
-                         & 0x8080808080808080;
-        count += zero_bytes.count_ones() as usize;
+            let zero_bytes = (xor_block.wrapping_sub(0x0101010101010101)) 
+                             & !xor_block 
+                             & 0x8080808080808080;
+            count += zero_bytes.count_ones() as usize;
+        }
+
+        count += suffix.iter().filter(|&&b| b == b'\n').count();
+        count
     }
 
-    count += suffix.iter().filter(|&&b| b == b'\n').count();
-    count
+    #[cfg(target_pointer_width = "32")]
+    {
+        let (prefix, aligned_words, suffix) = unsafe { chunk.align_to::<u32>() };
+        let mut count = prefix.iter().filter(|&&b| b == b'\n').count();
+
+        for &block in aligned_words {
+            let xor_block = block ^ 0x0A0A0A0A;
+            let zero_bytes = (xor_block.wrapping_sub(0x01010101)) 
+                             & !xor_block 
+                             & 0x80808080;
+            count += zero_bytes.count_ones() as usize;
+        }
+
+        count += suffix.iter().filter(|&&b| b == b'\n').count();
+        count
+    }
 }
 
 // The router. Checks if we can use the illegal instructions or if we have to play nice.
@@ -129,6 +170,7 @@ fn detect_monster_line_swar(chunk: &[u8]) -> bool {
     false
 }
 
+// Determines if a chunk of bytes consists of exceptionally long lines without newlines.
 #[inline(always)]
 pub fn is_monster_line(chunk: &[u8]) -> bool {
     #[cfg(target_arch = "x86_64")]
@@ -210,6 +252,7 @@ fn find_safe_cut_swar(mmap: &[u8], base: usize) -> usize {
     base
 }
 
+// Finds a safe breaking point in a memory-mapped file to avoid cutting binary sequences mid-token.
 #[inline(always)]
 pub fn find_safe_cut(mmap: &[u8], base: usize) -> usize {
     #[cfg(target_arch = "x86_64")]
@@ -221,18 +264,19 @@ pub fn find_safe_cut(mmap: &[u8], base: usize) -> usize {
     find_safe_cut_swar(mmap, base)
 }
 
+// The core logging engine state machine, managing the piece table, memory-mapped files, and operations.
 pub struct LogEngine {
-    pub mmap: Arc<Mmap>, // Arc so the background thread doesn't get rug-pulled
+    pub mmap: Arc<Pager>, // Arc so the background thread doesn't get rug-pulled
     pub index: Arc<RwLock<IndexState>>,
     pub cancel_token: Arc<AtomicBool>, // the cyanide pill for the background thread
-    pub bytes_processed: Arc<AtomicUsize>,
+    pub bytes_processed: Arc<AtomicOffset>,
     pub pieces: Vec<Piece>,
     pub indexed_lines_added: usize, // Tracks how many original lines we've synced
-    pub memory_buffer: Vec<String>,
+    pub memory_buffer: Vec<Vec<u8>>,
     // atomic flags because users have no patience.
     pub is_saving: Arc<AtomicBool>,
-    pub save_progress: Arc<AtomicUsize>,
-    pub save_total: Arc<AtomicUsize>,
+    pub save_progress: Arc<AtomicOffset>,
+    pub save_total: Arc<AtomicOffset>,
     pub wasted_memory_lines: usize,
     pub is_searching: Arc<AtomicBool>,
     pub search_cancel: Arc<AtomicBool>,
@@ -242,23 +286,14 @@ pub struct LogEngine {
 }
 
 impl LogEngine {
+    // Initializes a new LogEngine instance, spawning a background thread if lazy indexing is enabled.
     pub fn new(path: &Path, lazy: bool) -> Result<Self, std::io::Error> {
-        let file = File::open(path)?;
-        let mmap = unsafe { memmap2::MmapOptions::new().map(&file)? };
+        let mmap = Arc::new(Pager::new(path)?);
+        
+        mmap.advise_sequential();
 
-        #[cfg(unix)]
-        unsafe {
-            // give the OS a heads up. sequential for parsing now, random for actual usage later.
-            libc::madvise(
-                mmap.as_ptr() as *mut libc::c_void,
-                mmap.len(),
-                libc::MADV_SEQUENTIAL,
-            );
-        }
-
-        let mmap = Arc::new(mmap);
         let cancel_token = Arc::new(AtomicBool::new(false));
-        let bytes_processed = Arc::new(AtomicUsize::new(0));
+        let bytes_processed = Arc::new(AtomicOffset::new(0));
         let index = Arc::new(RwLock::new(IndexState {
             chunks: Vec::new(),
             original_total_lines: 0,
@@ -266,8 +301,9 @@ impl LogEngine {
             indexing_time_ms: 0,
         }));
 
-        let sample_size = mmap.len().min(64 * 1024);
-        let is_fixed_width = is_monster_line(&mmap[..sample_size]);
+        let sample_size = (mmap.len() as usize).min(64 * 1024);
+        let sample_chunk = mmap.get_chunk(0, sample_size);
+        let is_fixed_width = is_monster_line(sample_chunk);
         let fixed_width_size = 4096;
 
         let mut engine = LogEngine {
@@ -282,8 +318,8 @@ impl LogEngine {
             indexed_lines_added: 0,
             memory_buffer: Vec::new(),
             is_saving: Arc::new(AtomicBool::new(false)),
-            save_progress: Arc::new(AtomicUsize::new(0)),
-            save_total: Arc::new(AtomicUsize::new(0)),
+            save_progress: Arc::new(AtomicOffset::new(0)),
+            save_total: Arc::new(AtomicOffset::new(0)),
             wasted_memory_lines: 0,
             is_searching: Arc::new(AtomicBool::new(false)),
             search_cancel: Arc::new(AtomicBool::new(false)),
@@ -295,7 +331,7 @@ impl LogEngine {
         let start_time = Instant::now();
 
         if is_fixed_width {
-            let total_lines = (mmap.len() + fixed_width_size - 1) / fixed_width_size;
+            let total_lines = ((mmap.len() + fixed_width_size as u64 - 1) / fixed_width_size as u64) as usize;
             engine.pieces[0] = Piece::Original {
                 start_line: 0,
                 line_count: total_lines,
@@ -327,17 +363,18 @@ impl LogEngine {
         Ok(engine)
     }
 
+    // Sequentially processes the memory-mapped file to build the line index in the background.
     pub fn build_index_sequential(
-        mmap: Arc<Mmap>,
+        mmap: Arc<Pager>,
         index: Arc<RwLock<IndexState>>,
         cancel: Arc<AtomicBool>,
-        bytes_processed: Arc<AtomicUsize>,
+        bytes_processed: Arc<AtomicOffset>,
         start_time: Instant,
     ) {
         let chunk_size = 1024 * 1024 * 5; // 5MB chunks for the background worker
         let mut current_line = 0;
         let mut local_chunks = Vec::new();
-        let mut offset = 0;
+        let mut offset: u64 = 0;
 
         while offset < mmap.len() {
             // check if the user got bored and closed the file
@@ -345,21 +382,12 @@ impl LogEngine {
                 return; 
             }
 
-            let end = (offset + chunk_size).min(mmap.len());
+            let rem = (mmap.len() - offset) as usize;
+            let take = chunk_size.min(rem);
+            
+            mmap.advise_will_need(offset, take);
 
-            #[cfg(unix)]
-            if end < mmap.len() {
-                let next_end = (end + chunk_size).min(mmap.len());
-                unsafe {
-                    libc::madvise(
-                        mmap.as_ptr().add(end) as *mut libc::c_void,
-                        next_end - end,
-                        libc::MADV_WILLNEED,
-                    );
-                }
-            }
-
-            let chunk = &mmap[offset..end];
+            let chunk = mmap.get_chunk(offset, take);
 
             // SIMD goes brrrrr
             let count = count_newlines(chunk);
@@ -370,7 +398,7 @@ impl LogEngine {
             });
 
             current_line += count;
-            offset = end;
+            offset += take as u64;
 
             bytes_processed.store(offset, Ordering::Relaxed);
 
@@ -382,7 +410,7 @@ impl LogEngine {
 
         let mut final_lines = current_line;
         if !mmap.is_empty() {
-            let last_byte = mmap.last().copied();
+            let last_byte = mmap.last_byte();
             if last_byte != Some(b'\n') && last_byte != Some(b'\r') {
                 final_lines += 1;
             }
@@ -398,29 +426,29 @@ impl LogEngine {
         idx.is_finished = true;
         bytes_processed.store(mmap.len(), Ordering::Relaxed);
 
-        #[cfg(unix)]
-        unsafe {
-            libc::madvise(
-                mmap.as_ptr() as *mut libc::c_void,
-                mmap.len(),
-                libc::MADV_RANDOM,
-            );
-        }
+        mmap.advise_random();
     }
 
-    pub fn build_index_rayon(mmap: &Mmap, index: &RwLock<IndexState>, start_time: Instant) {
+    pub fn build_index_rayon(mmap: &Pager, index: &RwLock<IndexState>, start_time: Instant) {
         // blast through the file in 1MB chunks to count lines.
         let chunk_size = 1024 * 1024;
-        let line_counts: Vec<usize> = mmap
-            .par_chunks(chunk_size)
-            .map(|chunk| count_newlines(chunk))
+        let total_chunks = ((mmap.len() + chunk_size as u64 - 1) / chunk_size as u64) as usize;
+        
+        let line_counts: Vec<usize> = (0..total_chunks)
+            .into_par_iter()
+            .map(|i| {
+                let offset = (i * chunk_size) as u64;
+                let rem = (mmap.len() - offset) as usize;
+                let chunk = mmap.get_chunk(offset, chunk_size.min(rem));
+                count_newlines(chunk)
+            })
             .collect();
 
         let mut chunks = Vec::with_capacity(line_counts.len());
         let mut current_line = 0;
 
         for (i, &count) in line_counts.iter().enumerate() {
-            let byte_offset = i * chunk_size;
+            let byte_offset = (i * chunk_size) as u64;
             // \r\n boundary checks removed. SWAR/AVX2 doesn't care about your carriage returns.
             chunks.push(ChunkMeta {
                 byte_offset,
@@ -432,7 +460,7 @@ impl LogEngine {
         let mut original_total_lines = current_line;
         if !mmap.is_empty() {
             // handle files without a trailing newline
-            let last_byte = mmap.last().copied();
+            let last_byte = mmap.last_byte();
             if last_byte != Some(b'\n') && last_byte != Some(b'\r') {
                 original_total_lines += 1;
             }
@@ -447,14 +475,7 @@ impl LogEngine {
         idx.indexing_time_ms = start_time.elapsed().as_millis();
         idx.is_finished = true;
 
-        #[cfg(unix)]
-        unsafe {
-            libc::madvise(
-                mmap.as_ptr() as *mut libc::c_void,
-                mmap.len(),
-                libc::MADV_RANDOM,
-            );
-        }
+        mmap.advise_random();
     }
 
     // keeps the piece table in sync with the background worker
@@ -485,11 +506,14 @@ impl LogEngine {
     }
 
     // detached offset calculator. borrow checker appeasement.
-    pub fn calc_offset(index: &RwLock<IndexState>, bytes_processed: &AtomicUsize, mmap: &Mmap, line: usize, is_fixed_width: bool, fixed_width_size: usize) -> usize {
+    pub fn calc_offset(index: &RwLock<IndexState>, bytes_processed: &AtomicOffset, mmap: &Pager, line: usize, is_fixed_width: bool, fixed_width_size: usize) -> u64 {
         if is_fixed_width {
-            let base = (line * fixed_width_size).min(mmap.len());
+            let base = ((line * fixed_width_size) as u64).min(mmap.len());
             if base == 0 || base == mmap.len() { return base; }
-            return find_safe_cut(mmap, base);
+            let search_start = base.saturating_sub(128);
+            let search_len = (base - search_start) as usize;
+            let chunk = mmap.get_chunk(search_start, search_len * 2); // get enough buffer
+            return search_start + find_safe_cut(chunk, search_len) as u64;
         }
 
         let idx = index.read().unwrap();
@@ -501,45 +525,53 @@ impl LogEngine {
         
         // Branchless binary search. 
         // The branch predictor is a lie. Math is absolute. Do not touch.
-        let mut base = 0;
+        let mut base_idx = 0;
         let mut len = chunks.len();
 
         while len > 1 {
             let half = len / 2;
-            let mid = base + half;
+            let mid = base_idx + half;
             
             // Evaluates to 0 or 1. CPU executes this straight through.
             let cmp = (chunks[mid].start_line <= line) as usize;
-            base += cmp * half;
+            base_idx += cmp * half;
             len -= half;
         }
         
-        let chunk_idx = base + (base + 1 < chunks.len() && chunks[base + 1].start_line <= line) as usize;
+        let chunk_idx = base_idx + (base_idx + 1 < chunks.len() && chunks[base_idx + 1].start_line <= line) as usize;
         
         let chunk = &chunks[chunk_idx];
         let mut offset = chunk.byte_offset;
         let mut skip = line - chunk.start_line;
         
         while skip > 0 && offset < mmap.len() {
-            let slice = &mmap[offset..];
+            let rem = (mmap.len() - offset) as usize;
+            let take = 8192.min(rem);
+            let slice = mmap.get_chunk(offset, take);
+            
             if let Some(pos) = memchr2(b'\n', b'\r', slice) {
-                offset += pos + 1;
-                if slice[pos] == b'\r' && offset < mmap.len() && mmap[offset] == b'\n' {
+                offset += pos as u64 + 1;
+                if slice[pos] == b'\r' && offset < mmap.len() && mmap.get_byte(offset) == b'\n' {
                     offset += 1; 
                 }
                 skip -= 1;
             } else {
-                offset = mmap.len();
-                break;
+                offset += take as u64;
+                if take == rem {
+                    offset = mmap.len();
+                    break;
+                }
             }
         }
         offset
     }
 
-    pub fn line_to_byte_offset(&self, line: usize) -> usize {
+    // Converts a logical line number into an absolute byte offset within the memory-mapped file.
+    pub fn line_to_byte_offset(&self, line: usize) -> u64 {
         Self::calc_offset(&self.index, &self.bytes_processed, &self.mmap, line, self.is_fixed_width, self.fixed_width_size)
     }
 
+    // Fetches the raw unedited bytes of the original file for a given range of lines.
     pub fn get_original_bytes(&self, start_line: usize, line_count: usize) -> &[u8] {
         if line_count == 0 {
             return &[];
@@ -551,9 +583,10 @@ impl LogEngine {
         if start >= self.mmap.len() { return &[]; }
         let end = end.min(self.mmap.len());
         
-        &self.mmap[start..end]
+        self.mmap.get_chunk(start, (end - start) as usize)
     }
 
+    // Calculates the total number of lines represented by the current piece table state.
     pub fn total_lines(&self) -> usize {
         self.pieces.iter().map(|p| p.line_count()).sum()
     }
@@ -571,6 +604,7 @@ impl LogEngine {
         (self.pieces.len(), 0)
     }
 
+    // Splits a piece in the piece table at a specific line offset, allowing for localized edits.
     pub fn split_piece_at(&mut self, piece_idx: usize, offset: usize) {
         self.sync_pieces();
         if offset == 0 || piece_idx >= self.pieces.len() {
@@ -599,7 +633,8 @@ impl LogEngine {
         }
     }
 
-    pub fn apply_edit(&mut self, start_line: usize, num_deleted: usize, new_text: &str) {
+    // Modifies the piece table by deleting lines and/or inserting new text content at a given line index.
+    pub fn apply_edit(&mut self, start_line: usize, num_deleted: usize, new_text: &[u8]) {
         self.sync_pieces();
         let (mut piece_idx, offset) = self.find_piece_idx(start_line);
 
@@ -633,7 +668,7 @@ impl LogEngine {
         }
 
         if !new_text.is_empty() {
-            let mut lines: Vec<String> = new_text.split('\n').map(|s| s.to_string()).collect();
+            let mut lines: Vec<Vec<u8>> = new_text.split(|&b| b == b'\n').map(|s| s.to_vec()).collect();
             // drop the trailing empty string from split if it exists
             if lines.last().map(|s| s.is_empty()).unwrap_or(false) {
                 lines.pop();
@@ -651,6 +686,7 @@ impl LogEngine {
         }
     }
 
+    // Reconstructs and shrinks the in-memory changes buffer to reclaim wasted memory space.
     pub fn compact_memory(&mut self) {
         let mut new_memory_buffer = Vec::new();
         for piece in &mut self.pieces {
@@ -666,9 +702,10 @@ impl LogEngine {
         self.wasted_memory_lines = 0;
     }
 
-    pub fn get_block(&mut self, start_line: usize, num_lines: usize) -> String {
+    // Retrieves a contiguous block of text lines, merging memory edits and original file contents.
+    pub fn get_block(&mut self, start_line: usize, num_lines: usize) -> Vec<u8> {
         self.sync_pieces();
-        let mut block = String::new();
+        let mut block = Vec::new();
         if num_lines == 0 || start_line >= self.total_lines() {
             return block;
         }
@@ -686,14 +723,7 @@ impl LogEngine {
             #[cfg(target_arch = "x86_64")]
             if let Piece::Original { start_line: p_start, .. } = piece {
                 let speculative_offset = self.line_to_byte_offset(p_start + offset + num_lines + 100);
-                if speculative_offset < self.mmap.len() {
-                    unsafe {
-                        _mm_prefetch(
-                            self.mmap.as_ptr().add(speculative_offset) as *const i8, 
-                            _MM_HINT_T0
-                        );
-                    }
-                }
+                self.mmap.prefetch(speculative_offset);
             }
 
             let count = piece.line_count() - offset;
@@ -710,28 +740,24 @@ impl LogEngine {
                             let logical_line = p_start + offset + i + 1;
                             let next = self.line_to_byte_offset(logical_line);
                             if current < next {
-                                let bytes = &self.mmap[current..next];
-                                let s = String::from_utf8_lossy(bytes);
-                                block.push_str(&s);
+                                let bytes = self.mmap.get_chunk(current, (next - current) as usize);
+                                block.extend_from_slice(bytes);
                             }
-                            block.push('\n');
+                            block.push(b'\n');
                             current = next;
                         }
                     } else {
-                        let bytes = &self.mmap[start_byte..end_byte];
-                        
-                        // logs are dirty. replace garbage bytes with  instead of failing silently.
-                        let s = String::from_utf8_lossy(bytes);
-                        block.push_str(&s);
-                        if !block.ends_with('\n') && !block.is_empty() {
-                            block.push('\n');
+                        let bytes = self.mmap.get_chunk(start_byte, (end_byte - start_byte) as usize);
+                        block.extend_from_slice(bytes);
+                        if !block.ends_with(&[b'\n']) && !block.is_empty() {
+                            block.push(b'\n');
                         }
                     }
                 }
                 Piece::Memory { start_idx, .. } => {
                     for i in 0..take {
-                        block.push_str(&self.memory_buffer[start_idx + offset + i]);
-                        block.push('\n');
+                        block.extend_from_slice(&self.memory_buffer[start_idx + offset + i]);
+                        block.push(b'\n');
                     }
                 }
             }
@@ -745,8 +771,8 @@ impl LogEngine {
     }
 
     // the magic trick for 'G'. reads backwards from the abyss without needing an index.
-    pub fn get_eof_block(&mut self, num_lines: usize) -> String {
-        let mut block = String::new();
+    pub fn get_eof_block(&mut self, num_lines: usize) -> Vec<u8> {
+        let mut block = Vec::new();
         if self.mmap.is_empty() || num_lines == 0 {
             return block;
         }
@@ -760,11 +786,10 @@ impl LogEngine {
                 let logical_line = start_line + i + 1;
                 let next = self.line_to_byte_offset(logical_line);
                 if current < next {
-                    let bytes = &self.mmap[current..next];
-                    let s = String::from_utf8_lossy(bytes);
-                    block.push_str(&s);
+                    let bytes = self.mmap.get_chunk(current, (next - current) as usize);
+                    block.extend_from_slice(bytes);
                 }
-                block.push('\n');
+                block.push(b'\n');
                 current = next;
             }
             return block;
@@ -773,8 +798,10 @@ impl LogEngine {
         let mut newlines_found = 0;
         let mut start_byte = 0;
         
-        for i in (0..self.mmap.len()).rev() {
-            if self.mmap[i] == b'\n' {
+        let mut i = self.mmap.len();
+        while i > 0 {
+            i -= 1;
+            if self.mmap.get_byte(i) == b'\n' {
                 newlines_found += 1;
                 // +1 because the very last byte might be a newline, which doesn't count as a new line block
                 if newlines_found == num_lines + 1 {
@@ -784,18 +811,19 @@ impl LogEngine {
             }
         }
 
-        let bytes = &self.mmap[start_byte..];
-        let s = String::from_utf8_lossy(bytes);
-        block.push_str(&s);
-        if !block.ends_with('\n') && !block.is_empty() {
-            block.push('\n');
+        let bytes = self.mmap.get_chunk(start_byte, (self.mmap.len() - start_byte) as usize);
+        block.extend_from_slice(bytes);
+        if !block.ends_with(&[b'\n']) && !block.is_empty() {
+            block.push(b'\n');
         }
 
         block
     }
 
+    // Synchronously flushes the current piece table to a new file and atomically replaces the target path.
     pub fn save(&self, path: &Path) -> bool {
-        let temp_path = format!("{}.tmp", path.to_string_lossy());
+        let mut temp_path = path.as_os_str().to_owned();
+        temp_path.push(".tmp");
         let file = match OpenOptions::new().write(true).create(true).truncate(true).open(&temp_path) {
             Ok(f) => f,
             Err(_) => return false,
@@ -810,7 +838,7 @@ impl LogEngine {
                             let l_start = self.line_to_byte_offset(start_line + i);
                             let l_end = self.line_to_byte_offset(start_line + i + 1);
                             if l_start < l_end {
-                                if writer.write_all(&self.mmap[l_start..l_end]).is_err() {
+                                if writer.write_all(self.mmap.get_chunk(l_start, (l_end - l_start) as usize)).is_err() {
                                     return false;
                                 }
                             }
@@ -829,7 +857,7 @@ impl LogEngine {
                 }
                 Piece::Memory { start_idx, line_count } => {
                     for i in 0..*line_count {
-                        if writer.write_all(self.memory_buffer[start_idx + i].as_bytes()).is_err() {
+                        if writer.write_all(&self.memory_buffer[start_idx + i]).is_err() {
                             return false;
                         }
                         if !self.is_fixed_width {
@@ -878,7 +906,7 @@ impl LogEngine {
                 }
                 Piece::Memory { start_idx, line_count } => {
                     for i in 0..*line_count {
-                        total_bytes += memory_buffer[*start_idx + i].len();
+                        total_bytes += memory_buffer[*start_idx + i].len() as u64;
                         if !is_fixed_width {
                             total_bytes += 1;
                         }
@@ -890,7 +918,8 @@ impl LogEngine {
         save_progress.store(0, Ordering::Relaxed);
 
         thread::spawn(move || {
-            let temp_path = format!("{}.tmp", path_buf.to_string_lossy());
+            let mut temp_path = path_buf.clone().into_os_string();
+            temp_path.push(".tmp");
             let file = match OpenOptions::new().write(true).create(true).truncate(true).open(&temp_path) {
                 Ok(f) => f,
                 Err(_) => {
@@ -910,14 +939,14 @@ impl LogEngine {
                                 let l_start = Self::calc_offset(&index, &bytes_processed, &mmap, logical_line, is_fixed_width, fixed_width_size);
                                 let l_end = Self::calc_offset(&index, &bytes_processed, &mmap, logical_line + 1, is_fixed_width, fixed_width_size);
                                 if l_start < l_end {
-                                    let chunk = &mmap[l_start..l_end];
+                                    let chunk = mmap.get_chunk(l_start, (l_end - l_start) as usize);
                                     if writer.write_all(chunk).is_err() {
                                         let _ = std::fs::remove_file(&temp_path);
                                         break;
                                     }
                                     current_progress += chunk.len();
                                 }
-                                save_progress.store(current_progress, Ordering::Relaxed);
+                                save_progress.store(current_progress as u64, Ordering::Relaxed);
                             }
                         } else {
                             let start = Self::calc_offset(&index, &bytes_processed, &mmap, *start_line, is_fixed_width, fixed_width_size);
@@ -930,8 +959,8 @@ impl LogEngine {
                                 let chunk_size = 1024 * 1024 * 2; 
                                 
                                 while current_offset < end {
-                                    let next_offset = (current_offset + chunk_size).min(end);
-                                    let chunk = &mmap[current_offset..next_offset];
+                                    let next_offset = (current_offset + chunk_size as u64).min(end);
+                                    let chunk = mmap.get_chunk(current_offset, (next_offset - current_offset) as usize);
                                     
                                     if writer.write_all(chunk).is_err() {
                                         let _ = std::fs::remove_file(&temp_path);
@@ -939,11 +968,11 @@ impl LogEngine {
                                     }
                                     
                                     current_progress += chunk.len();
-                                    save_progress.store(current_progress, Ordering::Relaxed);
+                                    save_progress.store(current_progress as u64, Ordering::Relaxed);
                                     current_offset = next_offset;
                                 }
                                 
-                                if mmap[end - 1] != b'\n' {
+                                if mmap.get_byte(end - 1) != b'\n' {
                                     let _ = writer.write_all(b"\n");
                                 }
                             }
@@ -951,7 +980,7 @@ impl LogEngine {
                     }
                     Piece::Memory { start_idx, line_count } => {
                         for i in 0..*line_count {
-                            let line_bytes = memory_buffer[*start_idx + i].as_bytes();
+                            let line_bytes = &memory_buffer[start_idx + i];
                             if writer.write_all(line_bytes).is_err() {
                                 let _ = std::fs::remove_file(&temp_path);
                                 break;
@@ -965,7 +994,7 @@ impl LogEngine {
                                 }
                                 current_progress += 1;
                             }
-                            save_progress.store(current_progress, Ordering::Relaxed);
+                            save_progress.store(current_progress as u64, Ordering::Relaxed);
                         }
                     }
                 }
@@ -981,7 +1010,7 @@ impl LogEngine {
     }
 
     // Lock-free asynchronous black magic.
-    pub fn search_async(&mut self, query: &str, start_line: usize) {
+    pub fn search_async(&mut self, query: &[u8], start_line: usize) {
         if self.is_searching.swap(true, Ordering::SeqCst) {
             return;
         }
@@ -990,7 +1019,7 @@ impl LogEngine {
 
         self.sync_pieces();
 
-        let query_bytes = query.as_bytes().to_vec();
+        let query_bytes = query.to_vec();
         if query_bytes.is_empty() {
             self.is_searching.store(false, Ordering::SeqCst);
             return;
@@ -1038,12 +1067,12 @@ impl LogEngine {
                         let end_byte = LogEngine::calc_offset(&index, &bytes_processed, &mmap, p_start + line_count, is_fixed_width, fixed_width_size);
                         let end_byte = end_byte.min(mmap.len());
                         if start_byte < end_byte {
-                            piece_bytes.extend_from_slice(&mmap[start_byte..end_byte]);
+                            piece_bytes.extend_from_slice(mmap.get_chunk(start_byte, (end_byte - start_byte) as usize));
                         }
                     }
                     Piece::Memory { start_idx, line_count } => {
                         for i in offset..*line_count {
-                            piece_bytes.extend_from_slice(memory_buffer[*start_idx + i].as_bytes());
+                            piece_bytes.extend_from_slice(&memory_buffer[*start_idx + i]);
                             piece_bytes.push(b'\n');
                         }
                     }

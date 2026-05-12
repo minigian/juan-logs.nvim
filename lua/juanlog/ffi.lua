@@ -6,22 +6,22 @@ ffi.cdef [[
     
     typedef struct {
         float progress;
-        size_t total_lines;
-        size_t file_size_bytes;
+        uint64_t total_lines;
+        uint64_t file_size_bytes;
         uint64_t indexing_time_ms;
     } LogStats;
 
     LogEngine* log_engine_new(const char* path, bool lazy);
     float log_engine_get_progress(const LogEngine* engine);
-    size_t log_engine_total_lines(LogEngine* engine);
-    bool log_engine_get_block(LogEngine* engine, size_t start_line, size_t num_lines, char* out_buffer, size_t max_len, size_t* out_len);
-    bool log_engine_get_eof_block(LogEngine* engine, size_t num_lines, char* out_buffer, size_t max_len, size_t* out_len);
-    void log_engine_apply_edit(LogEngine* engine, size_t start_line, size_t num_deleted, const char* new_text);
+    uint64_t log_engine_total_lines(LogEngine* engine);
+    bool log_engine_get_block(LogEngine* engine, uint64_t start_line, uint64_t num_lines, char* out_buffer, uint64_t max_len, uint64_t* out_len);
+    bool log_engine_get_eof_block(LogEngine* engine, uint64_t num_lines, char* out_buffer, uint64_t max_len, uint64_t* out_len);
+    void log_engine_apply_edit(LogEngine* engine, uint64_t start_line, uint64_t num_deleted, const char* new_text, uint64_t new_text_len);
     bool log_engine_save(const LogEngine* engine, const char* path);
     bool log_engine_save_async(const LogEngine* engine, const char* path);
     float log_engine_get_save_progress(const LogEngine* engine);
-    ptrdiff_t log_engine_search(LogEngine* engine, const char* query, size_t start_line, size_t end_line);
-    ptrdiff_t log_engine_search_backward(LogEngine* engine, const char* query, size_t start_line, size_t end_line);
+    ptrdiff_t log_engine_search(LogEngine* engine, const char* query, uint64_t query_len, uint64_t start_line, uint64_t end_line);
+    ptrdiff_t log_engine_search_backward(LogEngine* engine, const char* query, uint64_t query_len, uint64_t start_line, uint64_t end_line);
     bool log_engine_get_stats(const LogEngine* engine, LogStats* out_stats);
     void log_engine_free(LogEngine* engine);
     bool log_engine_is_fixed_width(const LogEngine* engine);

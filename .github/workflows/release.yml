@@ -15,12 +15,20 @@ jobs:
           - os: ubuntu-latest
             cargo_out: target/release/libjuanlog.so
             release_name: libjuanlog-linux.so
+          - os: ubuntu-latest
+            target: i686-unknown-linux-gnu
+            cargo_out: target/i686-unknown-linux-gnu/release/libjuanlog.so
+            release_name: libjuanlog-linux-32bit.so
           - os: macos-latest
             cargo_out: target/release/libjuanlog.dylib
             release_name: libjuanlog-macos.dylib
           - os: windows-latest
             cargo_out: target/release/juanlog.dll
             release_name: libjuanlog-windows.dll
+          - os: windows-latest
+            target: i686-pc-windows-msvc
+            cargo_out: target/i686-pc-windows-msvc/release/juanlog.dll
+            release_name: libjuanlog-windows-32bit.dll
 
     runs-on: ${{ matrix.os }}
     steps:
@@ -28,9 +36,20 @@ jobs:
       
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target || '' }}
+          
+      - name: Install cross-compilation dependencies (Linux 32-bit)
+        if: matrix.target == 'i686-unknown-linux-gnu'
+        run: sudo apt-get update && sudo apt-get install -y gcc-multilib
         
       - name: Build release
-        run: cargo build --release
+        run: |
+          if [ -n "${{ matrix.target }}" ]; then
+            cargo build --release --target ${{ matrix.target }}
+          else
+            cargo build --release
+          fi
         
       - name: Rename binary for release
         shell: bash

@@ -2,20 +2,35 @@ local uv = vim.loop or vim.uv
 
 local function get_os_info()
     local sysname = uv.os_uname().sysname
+    local machine = uv.os_uname().machine
+    local arch = "64bit"
+
+    if machine == "i686" or machine == "i386" or machine == "x86" then
+        arch = "32bit"
+    end
+
     if sysname == "Windows_NT" then
-        return "windows", "dll"
+        return "windows", "dll", arch
     elseif sysname == "Darwin" then
-        return "macos", "dylib"
+        return "macos", "dylib", arch
     else
-        return "linux", "so"
+        return "linux", "so", arch
     end
 end
 
 local function build()
-    local os_name, ext = get_os_info()
+    local os_name, ext, arch = get_os_info()
     local repo = "minigian/juan-logs.nvim"
     
-    local release_file = string.format("libjuanlog-%s.%s", os_name, ext)
+    local is_32bit = arch == "32bit"
+
+    local release_file
+    if is_32bit then
+        release_file = string.format("libjuanlog-%s-32bit.%s", os_name, ext)
+    else
+        release_file = string.format("libjuanlog-%s.%s", os_name, ext)
+    end
+
     local download_url = string.format("https://github.com/%s/releases/latest/download/%s", repo, release_file)
 
     local script_path = debug.getinfo(1, "S").source:sub(2)
@@ -28,7 +43,11 @@ local function build()
 
     local out_file = string.format("%s/libjuanlog.%s", lib_dir, ext)
 
-    print("[JuanLog] Fetching pre-built binary for " .. os_name .. "...")
+    if is_32bit then
+        print("[JuanLog] 32-bit machine detected (" .. uv.os_uname().machine .. "). Fetching 32-bit binary...")
+    else
+        print("[JuanLog] Fetching pre-built binary for " .. os_name .. "...")
+    end
 
     local cmd
     if vim.fn.executable("curl") == 1 then

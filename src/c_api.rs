@@ -9,7 +9,7 @@ use memchr::memmem;
 #[cfg(unix)]
 use std::os::unix::ffi::OsStrExt;
 
-use crate::core::LogEngine;
+use crate::core::{LogEngine, LogPager};
 use crate::models::Piece;
 
 fn cstr_to_path<'a>(c_str: &'a CStr) -> &'a Path {
@@ -56,7 +56,7 @@ pub extern "C" fn log_engine_get_progress(engine: *const LogEngine) -> f32 {
 }
 
 #[no_mangle]
-pub extern "C" fn log_engine_total_lines(engine: *mut LogEngine) -> usize {
+pub extern "C" fn log_engine_total_lines(engine: *mut LogEngine) -> u64 {
     // :LogLines. fast because we already paid the price at startup.
     let engine = unsafe {
         if engine.is_null() {
@@ -66,17 +66,17 @@ pub extern "C" fn log_engine_total_lines(engine: *mut LogEngine) -> usize {
     };
     // force a sync so we don't lie to Lua about having 0 lines
     engine.sync_pieces();
-    engine.total_lines()
+    engine.total_lines() as u64
 }
 
 #[no_mangle]
 pub extern "C" fn log_engine_get_block(
     engine: *mut LogEngine,
-    start_line: usize,
-    num_lines: usize,
+    start_line: u64,
+    num_lines: u64,
     out_buffer: *mut c_char,
-    max_len: usize,
-    out_len: *mut usize,
+    max_len: u64,
+    out_len: *mut u64,
 ) -> bool {
     // the thing behind :LogJump and scrolling. fetches chunks without loading the whole file.
     let engine = unsafe {
@@ -85,17 +85,12 @@ pub extern "C" fn log_engine_get_block(
         }
         &mut *engine
     };
-    let block = engine.get_block(start_line, num_lines);
-    let mut bytes = block.into_bytes();
+    let block = engine.get_block(start_line as usize, num_lines as usize);
     
-    for b in &mut bytes {
-        if *b == 0 { *b = b' '; }
-    }
-    
-    let copy_len = std::cmp::min(bytes.len(), max_len - 1);
+    let copy_len = std::cmp::min(block.len() as u64, max_len - 1);
     unsafe {
-        std::ptr::copy_nonoverlapping(bytes.as_ptr(), out_buffer as *mut u8, copy_len);
-        *out_buffer.add(copy_len) = 0;
+        std::ptr::copy_nonoverlapping(block.as_ptr(), out_buffer as *mut u8, copy_len as usize);
+        *out_buffer.add(copy_len as usize) = 0;
         if !out_len.is_null() {
             *out_len = copy_len;
         }
@@ -106,26 +101,21 @@ pub extern "C" fn log_engine_get_block(
 #[no_mangle]
 pub extern "C" fn log_engine_get_eof_block(
     engine: *mut LogEngine,
-    num_lines: usize,
+    num_lines: u64,
     out_buffer: *mut c_char,
-    max_len: usize,
-    out_len: *mut usize,
+    max_len: u64,
+    out_len: *mut u64,
 ) -> bool {
     let engine = unsafe {
         if engine.is_null() || out_buffer.is_null() || max_len == 0 { return false; }
         &mut *engine
     };
-    let block = engine.get_eof_block(num_lines);
-    let mut bytes = block.into_bytes();
+    let block = engine.get_eof_block(num_lines as usize);
     
-    for b in &mut bytes {
-        if *b == 0 { *b = b' '; }
-    }
-    
-    let copy_len = std::cmp::min(bytes.len(), max_len - 1);
+    let copy_len = std::cmp::min(block.len() as u64, max_len - 1);
     unsafe {
-        std::ptr::copy_nonoverlapping(bytes.as_ptr(), out_buffer as *mut u8, copy_len);
-        *out_buffer.add(copy_len) = 0;
+        std::ptr::copy_nonoverlapping(block.as_ptr(), out_buffer as *mut u8, copy_len as usize);
+        *out_buffer.add(copy_len as usize) = 0;
         if !out_len.is_null() {
             *out_len = copy_len;
         }
@@ -136,9 +126,10 @@ pub extern "C" fn log_engine_get_eof_block(
 #[no_mangle]
 pub extern "C" fn log_engine_apply_edit(
     engine: *mut LogEngine,
-    start_line: usize,
-    num_deleted: usize,
+    start_line: u64,
+    num_deleted: u64,
     new_text: *const c_char,
+    new_text_len: u64,
 ) {
     let engine = unsafe {
         if engine.is_null() {
@@ -147,12 +138,12 @@ pub extern "C" fn log_engine_apply_edit(
         &mut *engine
     };
     // nvim might send weird stuff, salvage what we can.
-    let text = if new_text.is_null() {
-        String::new()
+    let text = if new_text.is_null() || new_text_len == 0 {
+        &[]
     } else {
-        unsafe { CStr::from_ptr(new_text) }.to_string_lossy().into_owned()
+        unsafe { std::slice::from_raw_parts(new_text as *const u8, new_text_len as usize) }
     };
-    engine.apply_edit(start_line, num_deleted, &text);
+    engine.apply_edit(start_line as usize, num_deleted as usize, text);
 }
 
 #[no_mangle]
@@ -204,8 +195,9 @@ pub extern "C" fn log_engine_get_save_progress(engine: *const LogEngine) -> f32 
 pub extern "C" fn log_engine_search(
     engine: *mut LogEngine,
     query: *const c_char,
-    start_line: usize,
-    end_line: usize, // Bounded search to prevent the PC from melting
+    query_len: u64,
+    start_line: u64,
+    end_line: u64, // Bounded search to prevent the PC from melting
 ) -> isize {
     let engine = unsafe {
         if engine.is_null() {
@@ -213,29 +205,24 @@ pub extern "C" fn log_engine_search(
         }
         &mut *engine
     };
-    if query.is_null() {
+    if query.is_null() || query_len == 0 {
         return -1;
     }
-    let query_bytes = match unsafe { CStr::from_ptr(query) }.to_bytes_with_nul().split_last() {
-        Some((&0, bytes)) => bytes,
-        _ => return -1,
-    };
-    if query_bytes.is_empty() {
-        return -1;
-    }
+    let query_bytes = unsafe { std::slice::from_raw_parts(query as *const u8, query_len as usize) };
 
     engine.sync_pieces();
-    let (mut piece_idx, mut offset) = engine.find_piece_idx(start_line);
-    let mut current_logical = start_line;
+    let (mut piece_idx, mut offset) = engine.find_piece_idx(start_line as usize);
+    let mut current_logical = start_line as usize;
+    let end_logical = end_line as usize;
 
     while piece_idx < engine.pieces.len() {
-        if current_logical > end_line {
+        if current_logical > end_logical {
             break; // User's patience limit reached
         }
 
         let piece = &engine.pieces[piece_idx];
         let available_lines = piece.line_count() - offset;
-        let lines_to_search = std::cmp::min(available_lines, end_line.saturating_sub(current_logical) + 1);
+        let lines_to_search = std::cmp::min(available_lines, end_logical.saturating_sub(current_logical) + 1);
 
         match piece {
             Piece::Original { start_line: p_start, .. } => {
@@ -251,10 +238,9 @@ pub extern "C" fn log_engine_search(
                 }
             }
             Piece::Memory { start_idx, .. } => {
-                // query might be cursed too.
-                let q_str = String::from_utf8_lossy(query_bytes);
+                // native bytes
                 for i in 0..lines_to_search {
-                    if engine.memory_buffer[start_idx + offset + i].contains(q_str.as_ref()) {
+                    if memmem::find(&engine.memory_buffer[start_idx + offset + i], query_bytes).is_some() {
                         return (current_logical + i) as isize;
                     }
                 }
@@ -271,8 +257,9 @@ pub extern "C" fn log_engine_search(
 pub extern "C" fn log_engine_search_backward(
     engine: *mut LogEngine,
     query: *const c_char,
-    start_line: usize,
-    end_line: usize, // The floor of our search
+    query_len: u64,
+    start_line: u64,
+    end_line: u64, // The floor of our search
 ) -> isize {
     let engine = unsafe {
         if engine.is_null() {
@@ -280,35 +267,30 @@ pub extern "C" fn log_engine_search_backward(
         }
         &mut *engine
     };
-    if query.is_null() {
+    if query.is_null() || query_len == 0 {
         return -1;
     }
-    let query_bytes = match unsafe { CStr::from_ptr(query) }.to_bytes_with_nul().split_last() {
-        Some((&0, bytes)) => bytes,
-        _ => return -1,
-    };
-    if query_bytes.is_empty() {
-        return -1;
-    }
+    let query_bytes = unsafe { std::slice::from_raw_parts(query as *const u8, query_len as usize) };
 
     engine.sync_pieces();
-    let (mut piece_idx, mut offset) = engine.find_piece_idx(start_line);
+    let (mut piece_idx, mut offset) = engine.find_piece_idx(start_line as usize);
     if piece_idx >= engine.pieces.len() {
         piece_idx = engine.pieces.len().saturating_sub(1);
         offset = engine.pieces[piece_idx].line_count().saturating_sub(1);
     }
 
-    let mut current_logical = start_line;
+    let mut current_logical = start_line as usize;
+    let end_logical = end_line as usize;
 
     // walking backwards through pieces.
     loop {
         let piece_start_logical = current_logical.saturating_sub(offset);
-        if current_logical < end_line { 
+        if current_logical < end_logical { 
             break; // Hit the floor
         }
 
         let piece = &engine.pieces[piece_idx];
-        let skip = if end_line > piece_start_logical { end_line - piece_start_logical } else { 0 };
+        let skip = if end_logical > piece_start_logical { end_logical - piece_start_logical } else { 0 };
         let lines_to_fetch = offset + 1 - skip;
 
         match piece {
@@ -325,9 +307,8 @@ pub extern "C" fn log_engine_search_backward(
                 }
             }
             Piece::Memory { start_idx, .. } => {
-                let q_str = String::from_utf8_lossy(query_bytes);
                 for i in (skip..=offset).rev() {
-                    if engine.memory_buffer[start_idx + i].contains(q_str.as_ref()) {
+                    if memmem::rfind(&engine.memory_buffer[start_idx + i], query_bytes).is_some() {
                         return (piece_start_logical + i) as isize;
                     }
                 }
@@ -347,8 +328,8 @@ pub extern "C" fn log_engine_search_backward(
 #[repr(C)]
 pub struct LogStats {
     pub progress: f32,
-    pub total_lines: usize,
-    pub file_size_bytes: usize,
+    pub total_lines: u64,
+    pub file_size_bytes: u64,
     pub indexing_time_ms: u64,
 }
 
@@ -369,7 +350,7 @@ pub extern "C" fn log_engine_get_stats(engine: *const LogEngine, out_stats: *mut
         (*out_stats).progress = progress;
         // We don't call sync_pieces here because we only have a const pointer.
         // Summing the pieces gives us the currently synced total, which is accurate enough for stats.
-        (*out_stats).total_lines = engine.pieces.iter().map(|p| p.line_count()).sum();
+        (*out_stats).total_lines = engine.pieces.iter().map(|p| p.line_count() as u64).sum();
         (*out_stats).file_size_bytes = engine.mmap.len();
         (*out_stats).indexing_time_ms = idx.indexing_time_ms as u64;
     }
@@ -393,15 +374,16 @@ pub extern "C" fn log_engine_free(engine: *mut LogEngine) {
 pub extern "C" fn log_engine_search_async(
     engine: *mut LogEngine,
     query: *const c_char,
-    start_line: usize,
+    query_len: u64,
+    start_line: u64,
 ) {
     let engine = unsafe {
         if engine.is_null() { return; }
         &mut *engine
     };
-    if query.is_null() { return; }
-    let query_str = unsafe { CStr::from_ptr(query) }.to_string_lossy();
-    engine.search_async(query_str.as_ref(), start_line);
+    if query.is_null() || query_len == 0 { return; }
+    let query_bytes = unsafe { std::slice::from_raw_parts(query as *const u8, query_len as usize) };
+    engine.search_async(query_bytes, start_line as usize);
 }
 
 #[no_mangle]
@@ -424,6 +406,7 @@ pub extern "C" fn log_engine_cancel_search(engine: *mut LogEngine) {
     };
     engine.search_cancel.store(true, Ordering::SeqCst);
 }
+
 
 #[no_mangle]
 pub extern "C" fn log_engine_is_fixed_width(engine: *const LogEngine) -> bool {
