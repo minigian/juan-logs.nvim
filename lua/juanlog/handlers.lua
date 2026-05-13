@@ -42,14 +42,14 @@ local function attach_buffer_events(bufnr, state, filepath)
                 state.save_timer:start(100, 100, vim.schedule_wrap(function()
                     if not vim.api.nvim_buf_is_valid(bufnr) then
                         state.save_timer:stop()
-                        state.save_timer:close()
+                        pcall(state.save_timer.close, state.save_timer)
                         return
                     end
                     
                     local p = lib.log_engine_get_save_progress(state.engine)
                     if p < 0.0 then
                         state.save_timer:stop()
-                        state.save_timer:close()
+                        pcall(state.save_timer.close, state.save_timer)
                         state.save_progress = -1.0
                         vim.b[bufnr].juanlog_status = nil
                         
@@ -84,7 +84,8 @@ local function attach_buffer_events(bufnr, state, filepath)
             state.timer:start(15, 0, vim.schedule_wrap(function()
                 if state.updating or not vim.api.nvim_buf_is_valid(bufnr) then return end
 
-                local cursor = vim.api.nvim_win_get_cursor(0)
+                local ok, cursor = pcall(vim.api.nvim_win_get_cursor, 0)
+                if not ok then return end
                 local row = cursor[1]
                 local buf_lines = vim.api.nvim_buf_line_count(bufnr)
                 
@@ -208,7 +209,7 @@ local function setup_dynamic_window(bufnr, engine, total_lines, filepath)
         state.poll_timer:start(100, 100, vim.schedule_wrap(function()
             if not vim.api.nvim_buf_is_valid(bufnr) then
                 state.poll_timer:stop()
-                state.poll_timer:close()
+                pcall(state.poll_timer.close, state.poll_timer)
                 return
             end
             
@@ -217,7 +218,7 @@ local function setup_dynamic_window(bufnr, engine, total_lines, filepath)
             
             if p >= 1.0 then
                 state.poll_timer:stop()
-                state.poll_timer:close()
+                pcall(state.poll_timer.close, state.poll_timer)
                 finish_indexing(bufnr, state, filepath, true)
             else
                 core.force_set_lines(bufnr, 0, -1, false, { string.format("[INDEXING... %d%%]", math.floor(p * 100)) })
@@ -231,7 +232,7 @@ local function setup_dynamic_window(bufnr, engine, total_lines, filepath)
             state.poll_timer:start(100, 100, vim.schedule_wrap(function()
                 if not vim.api.nvim_buf_is_valid(bufnr) then
                     state.poll_timer:stop()
-                    state.poll_timer:close()
+                    pcall(state.poll_timer.close, state.poll_timer)
                     return
                 end
                 
@@ -241,7 +242,7 @@ local function setup_dynamic_window(bufnr, engine, total_lines, filepath)
                 
                 if p >= 1.0 then
                     state.poll_timer:stop()
-                    state.poll_timer:close()
+                    pcall(state.poll_timer.close, state.poll_timer)
                     vim.notify("[JuanLog] Indexing complete. Total lines: " .. state.total, vim.log.levels.INFO)
                     if state.is_eof_mode then
                         core.jump_to_eof(bufnr, state)
