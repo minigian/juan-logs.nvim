@@ -18,20 +18,38 @@ local function get_os_info()
     end
 end
 
-local function build()
+local function build_local(plugin_root, out_file, ext, os_name)
+    print("[JuanLog] Compiling locally with cargo...")
+    if vim.fn.executable("cargo") == 1 then
+        local build_cmd = string.format('cd "%s" && cargo build --release', plugin_root)
+        if os_name == "windows" then
+            build_cmd = string.format('cd /d "%s" && cargo build --release', plugin_root)
+        end
+        
+        vim.fn.system(build_cmd)
+        
+        local cargo_output_name = "libjuanlog." .. ext
+        if os_name == "windows" then
+            cargo_output_name = "juanlog.dll"
+        end
+        
+        local target_bin = string.format("%s/target/release/%s", plugin_root, cargo_output_name)
+        if vim.fn.filereadable(target_bin) == 1 then
+            uv.fs_copyfile(target_bin, out_file)
+            print("[JuanLog] Local build finished.")
+        else
+            print("[JuanLog] Error: Cargo build failed.")
+        end
+    else
+        print("[JuanLog] Error: 'cargo' is missing, cannot compile locally.")
+    end
+end
+
+local function build(force_local)
     local os_name, ext, arch = get_os_info()
     local repo = "minigian/juan-logs.nvim"
     
     local is_32bit = arch == "32bit"
-
-    local release_file
-    if is_32bit then
-        release_file = string.format("libjuanlog-%s-32bit.%s", os_name, ext)
-    else
-        release_file = string.format("libjuanlog-%s.%s", os_name, ext)
-    end
-
-    local download_url = string.format("https://github.com/%s/releases/latest/download/%s", repo, release_file)
 
     local script_path = debug.getinfo(1, "S").source:sub(2)
     local plugin_root = vim.fn.fnamemodify(script_path, ":h")
@@ -42,6 +60,20 @@ local function build()
     end
 
     local out_file = string.format("%s/libjuanlog.%s", lib_dir, ext)
+
+    if force_local then
+        build_local(plugin_root, out_file, ext, os_name)
+        return
+    end
+
+    local release_file
+    if is_32bit then
+        release_file = string.format("libjuanlog-%s-32bit.%s", os_name, ext)
+    else
+        release_file = string.format("libjuanlog-%s.%s", os_name, ext)
+    end
+
+    local download_url = string.format("https://github.com/%s/releases/latest/download/%s", repo, release_file)
 
     if is_32bit then
         print("[JuanLog] 32-bit machine detected (" .. uv.os_uname().machine .. "). Fetching 32-bit binary...")
@@ -65,32 +97,18 @@ local function build()
     
     if vim.v.shell_error ~= 0 then
         print("[JuanLog] Download failed. Falling back to cargo build...")
-        if vim.fn.executable("cargo") == 1 then
-            local build_cmd = string.format('cd "%s" && cargo build --release', plugin_root)
-            if os_name == "windows" then
-                build_cmd = string.format('cd /d "%s" && cargo build --release', plugin_root)
-            end
-            
-            vim.fn.system(build_cmd)
-            
-            local cargo_output_name = "libjuanlog." .. ext
-            if os_name == "windows" then
-                cargo_output_name = "juanlog.dll"
-            end
-            
-            local target_bin = string.format("%s/target/release/%s", plugin_root, cargo_output_name)
-            if vim.fn.filereadable(target_bin) == 1 then
-                uv.fs_copyfile(target_bin, out_file)
-                print("[JuanLog] Local build finished.")
-            else
-                print("[JuanLog] Error: Cargo build failed.")
-            end
-        else
-            print("[JuanLog] Error: Download failed and 'cargo' is missing.")
-        end
+        build_local(plugin_root, out_file, ext, os_name)
     else
         print("[JuanLog] Binary downloaded to " .. out_file)
     end
 end
 
-build()
+local args = { ... }
+local force_local = false
+for _, v in ipairs(args) do
+    if v == "local" or v == "--local" then
+        force_local = true
+    end
+end
+
+build(force_local)

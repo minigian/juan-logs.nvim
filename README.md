@@ -66,10 +66,12 @@ Using **lazy.nvim**:
     build = function(plugin)
         local path = plugin.dir .. "/build.lua"
         if vim.fn.filereadable(path) == 1 then
+            -- By default this downloads the pre-compiled binary.
+            -- To build locally from source (requires cargo), use:
+            -- loadfile(path)("local")
             dofile(path)
         end
     end,
-    -- You can use `build = "cargo build --release"` if you have `cargo` in your system
     config = function()
         require("juanlog").setup({
             threshold_size = 1024 * 1024 * 100, -- 100MB trigger
