@@ -47,7 +47,7 @@ A: Because Juan the horse is a truly hilarious character. How did this specimen 
 
 ## Requirements
 - Neovim >= 0.9.0
-- Processor
+- Processor (32 or 64 bits)
 - Have ram
 - Have a disk
 - Have a screen
