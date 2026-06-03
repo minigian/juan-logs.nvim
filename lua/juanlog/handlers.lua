@@ -245,6 +245,7 @@ local function setup_dynamic_window(bufnr, engine, total_lines, filepath)
                     state.updating = true
                     local lines = core.fetch_lines(state.engine, 0, state.chunk_size)
                     core.force_set_lines(bufnr, 0, -1, false, lines)
+                    vim.api.nvim_buf_set_option(bufnr, 'modified', false)
                     core.safe_set_cursor(0, {1, 0})
                     state.initial_render_done = true
                     state.updating = false
@@ -257,6 +258,7 @@ local function setup_dynamic_window(bufnr, engine, total_lines, filepath)
                         state.updating = true
                         local lines = core.fetch_lines(state.engine, 0, state.chunk_size)
                         core.force_set_lines(bufnr, 0, -1, false, lines)
+                        vim.api.nvim_buf_set_option(bufnr, 'modified', false)
                         core.safe_set_cursor(0, {1, 0})
                         state.initial_render_done = true
                         state.updating = false
