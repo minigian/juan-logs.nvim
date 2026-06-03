@@ -14,7 +14,7 @@ _G._juan_log_statuscol = function()
     local b = vim.api.nvim_win_get_buf(winid)
     local st = _G.JuanLogStates[b]
     
-    if st and config.mode == "dynamic" then
+    if st then
         if not config.lazy and st.indexing_progress < 1.0 then
             return "%=~ "
         elseif st.is_eof_mode then
@@ -86,36 +86,6 @@ end
 -- swallow the red error if the window died or the buffer desynced.
 function M.safe_set_cursor(winid, pos)
     pcall(vim.api.nvim_win_set_cursor, winid, pos)
-end
-
-function M.load_all_lines(bufnr, engine, total_lines)
-    local chunk_size = 50000 
-    local loaded = 0
-    
-    -- disable undo history or nvim RAM usage will skyrocket
-    vim.api.nvim_buf_set_option(bufnr, 'undolevels', -1)
-    
-    -- async recursive loading so we don't freeze the UI
-    local function load_next_chunk()
-        if not vim.api.nvim_buf_is_valid(bufnr) then return end
-        
-        local to_fetch = math.min(chunk_size, total_lines - loaded)
-        local lines = M.fetch_lines(engine, loaded, to_fetch)
-        
-        if #lines > 0 then
-            M.force_set_lines(bufnr, -1, -1, false, lines)
-        end
-        
-        loaded = loaded + to_fetch
-        
-        if loaded < total_lines then
-            vim.defer_fn(load_next_chunk, 5) -- yield to neovim's event loop
-        else
-            vim.api.nvim_buf_set_option(bufnr, 'modified', false)
-        end
-    end
-    
-    load_next_chunk()
 end
 
 -- "teleport" the visible window to a new location in the huge file

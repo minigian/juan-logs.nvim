@@ -1,10 +1,9 @@
 local M = {
     threshold_size = 1024 * 1024 * 100, -- 100MB trigger
-    mode = "dynamic",
     lazy = true, -- false = block until indexed, true = on-demand loading
     dynamic_chunk_size = 10000,
     dynamic_margin = 2000, -- reload when we get this close to the edge
-    patterns = { "*" },
+    patterns = { "*.log", "*.txt", "*.csv", "*.json" },
     enable_custom_statuscol = true,
     syntax = false
 }

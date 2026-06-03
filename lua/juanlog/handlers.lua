@@ -172,6 +172,7 @@ local function setup_dynamic_window(bufnr, engine, total_lines, filepath)
         timer = vim.loop.new_timer(),
         indexing_progress = 0.0,
         is_eof_mode = false,
+        initial_render_done = false,
         poll_timer = nil,
         save_progress = -1.0,
         save_timer = nil,
@@ -240,9 +241,26 @@ local function setup_dynamic_window(bufnr, engine, total_lines, filepath)
                 state.indexing_progress = p
                 state.total = tonumber(lib.log_engine_total_lines(state.engine))
                 
+                if not state.initial_render_done and state.total > 0 then
+                    state.updating = true
+                    local lines = core.fetch_lines(state.engine, 0, state.chunk_size)
+                    core.force_set_lines(bufnr, 0, -1, false, lines)
+                    core.safe_set_cursor(0, {1, 0})
+                    state.initial_render_done = true
+                    state.updating = false
+                end
+                
                 if p >= 1.0 then
                     state.poll_timer:stop()
                     pcall(state.poll_timer.close, state.poll_timer)
+                    if not state.initial_render_done and state.total > 0 then
+                        state.updating = true
+                        local lines = core.fetch_lines(state.engine, 0, state.chunk_size)
+                        core.force_set_lines(bufnr, 0, -1, false, lines)
+                        core.safe_set_cursor(0, {1, 0})
+                        state.initial_render_done = true
+                        state.updating = false
+                    end
                     vim.notify("[JuanLog] Indexing complete. Total lines: " .. state.total, vim.log.levels.INFO)
                     if state.is_eof_mode then
                         core.jump_to_eof(bufnr, state)
@@ -289,12 +307,8 @@ function M.attach_to_buffer(bufnr, filepath)
     end
     pcall(function() vim.opt_local.spell = false end)
 
-    if config.mode == "load_all" then
-        core.load_all_lines(bufnr, engine, total_lines)
-    else
-        setup_dynamic_window(bufnr, engine, total_lines, filepath)
-        commands.setup_commands(bufnr)
-    end
+    setup_dynamic_window(bufnr, engine, total_lines, filepath)
+    commands.setup_commands(bufnr)
 
     vim.api.nvim_create_autocmd("BufWipeout", {
         buffer = bufnr,

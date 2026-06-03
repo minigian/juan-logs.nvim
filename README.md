@@ -75,7 +75,6 @@ Using **lazy.nvim**:
     config = function()
         require("juanlog").setup({
             threshold_size = 1024 * 1024 * 100, -- 100MB trigger
-            mode = "dynamic", -- I don't remember the other mode name, but it's useless so don't worry
             lazy = true, -- background indexing. prevents neovim from freezing
             dynamic_chunk_size = 10000, -- lines to load at once
             dynamic_margin = 2000, -- trigger scroll load when this close to the edge
@@ -89,7 +88,7 @@ Using **lazy.nvim**:
 
 ## Usage
 
-When a file exceeds the `threshold_size`, it opens in dynamic mode. Since only a small chunk of the file is loaded in RAM, standard Vim search and navigation won't work across the entire file. Use the following instead:
+When a file exceeds the `threshold_size`, it opens with dynamic loading. Since only a small chunk of the file is loaded in RAM, standard Vim search and navigation won't work across the entire file. Use the following instead:
 
 ### Commands
 - `:Logfind <query> [flags]` - Search for a string across the file. Supports flags to limit the search area and save CPU (and your time):
